@@ -1,0 +1,55 @@
+DP-SGD:
+
+Es importante saber que existen tres tipos de hiperparámetros especificos para 
+la privacidad:
+
+l2_norm_clip (float) - El euclidiana (L2) norma máxima de cada gradiente que se aplica
+a los parámetros del modelo de actualización. Este hiperparámetro se utiliza para 
+limitar la sensibilidad del optimizador a puntos de entrenamiento individuales.
+
+
+noise_multiplier (float) - La cantidad de ruido muestreada y se añade a los gradientes
+durante el entrenamiento. Generalmente, más ruido da como resultado una mejor 
+privacidad (a menudo, pero no necesariamente, a expensas de una menor utilidad).
+
+microbatches (int) - Cada lote de datos se divide en unidades más pequeñas llamadas
+microbatches. De forma predeterminada, cada microlote debe contener un solo ejemplo
+de entrenamiento. Esto nos permite recortar gradientes por ejemplo en lugar de después
+de que se hayan promediado en el minilote. Esto, a su vez, reduce el efecto (negativo)
+del recorte en la señal que se encuentra en el gradiente y normalmente maximiza la 
+utilidad. Sin embargo, la sobrecarga computacional se puede reducir aumentando el 
+tamaño de los microlotes para incluir más de un ejemplo de entrenamiento. Luego se 
+recorta el gradiente promedio a través de estos múltiples ejemplos de entrenamiento.
+El número total de ejemplos consumidos en un lote, es decir, un paso de descenso de
+gradiente, sigue siendo el mismo. El número de microlotes debe dividir uniformemente
+el tamaño del lote.
+
+
+learning_rate (float) - Este hiperparámetro ya existe en la vainilla SGD. Cuanto mayor 
+sea la tasa de aprendizaje, más importante será cada actualización. Si las 
+actualizaciones son ruidosas (como cuando el ruido aditivo es grande en comparación
+con el umbral de recorte), una tasa de aprendizaje baja puede ayudar a que el 
+procedimiento de entrenamiento converja.
+
+
+
+# Dividir por clases
+    X_majority = X[y == 0]
+    X_minority = X[y == 1]
+
+    y_majority = y[y == 0]
+    y_minority = y[y == 1]
+
+    # Downsample majority class
+    X_majority_downsampled, y_majority_downsampled = resample(
+        X_majority,
+        y_majority,
+        replace=False,
+        n_samples=len(y_minority),
+        random_state=42,
+    )
+
+    # orden para balancearrrrrrr
+
+    X_balanced = pd.concat([X_majority_downsampled, X_minority])
+    y_balanced = pd.concat([y_majority_downsampled, y_minority])

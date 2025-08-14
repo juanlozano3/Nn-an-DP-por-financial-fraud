@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/PD%20Juan%20Diego%20y%20Manuela/Algoritmos/mlruns/326363407605104692/8562c2056d47472998fecc9878572dc5/artifacts
+end_time: 1754322262893
+entry_point_name: ''
+experiment_id: '326363407605104692'
+lifecycle_stage: active
+run_id: 8562c2056d47472998fecc9878572dc5
+run_name: DP-SGD-PCA-VarSelection
+run_uuid: 8562c2056d47472998fecc9878572dc5
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1754322228090
+status: 4
+tags: []
+user_id: juanl
