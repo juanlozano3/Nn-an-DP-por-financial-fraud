@@ -22,6 +22,13 @@ from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy_lib
 import mlflow
 import mlflow.tensorflow
 
+import sys, os
+
+
+GDP_REPO = "../Deep-Learning-with-GDP-Tensorflow"
+sys.path.append(GDP_REPO)
+from gdp_accountant import compute_epsP, compute_epsilon
+
 
 def define_model(features):
     """
@@ -256,10 +263,21 @@ def main():
                 batch_size=batch_size,
                 noise_multiplier=params["noise_multiplier"],
                 epochs=epoch,
-                delta=1e-5,
+                delta=1e-6,
             )
 
             print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}, δ = 1e-5")
+
+            epsilon_gdp_P = compute_epsP(
+                epoch,
+                params["noise_multiplier"],
+                X_train.shape[0],
+                batch_size,
+                1e-6,
+            )
+
+            print("epsilon arreglado para gausiana: ")
+            print(epsilon_gdp_P)
 
 
 if __name__ == "__main__":
