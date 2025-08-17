@@ -1,2 +1,3 @@
 # Ignorar carpeta de datos pesados
 Datos/
+.DS_Store
