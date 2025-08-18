@@ -95,7 +95,9 @@ def model_builder(hp):
     model.add(keras.layers.Dense(units=hp_units2, activation="relu"))
 
     # Capa de salida (sigmoid si es multiclase one-hot)
-    model.add(keras.layers.Dense(y_train.shape[1], activation="sigmoid"))
+    #Cambio MLmodel.add(keras.layers.Dense(y_train.shape[1], activation="sigmoid"))
+
+    model.add(keras.layers.Dense(1, activation="sigmoid"))
 
     # Learning rate del optimizador
     hp_learning_rate = hp.Choice("learning_rate", values=[0.01, 0.05, 0.1, 0.25])
@@ -104,7 +106,8 @@ def model_builder(hp):
 
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.CategoricalCrossentropy(from_logits=False),
+        #Cambio ML loss=keras.losses.CategoricalCrossentropy(from_logits=False),
+        loss=keras.losses.BinaryCrossentropy(from_logits=False),
         metrics=["accuracy"],
     )
 
