@@ -1,8 +1,9 @@
 artifact_uri: file:///Users/juanl/Documents/PD%20Juan%20Diego%20y%20Manuela/Algoritmos/mlruns/326363407605104692/2019df1f4c3a468889d83ab9709f6462/artifacts
+deleted_time: 1755478907679
 end_time: 1754328732140
 entry_point_name: ''
 experiment_id: '326363407605104692'
-lifecycle_stage: active
+lifecycle_stage: deleted
 run_id: 2019df1f4c3a468889d83ab9709f6462
 run_name: DP-SGD-PCA-VarSelection-All
 run_uuid: 2019df1f4c3a468889d83ab9709f6462

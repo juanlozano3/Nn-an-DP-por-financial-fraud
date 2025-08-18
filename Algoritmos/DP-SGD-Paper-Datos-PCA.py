@@ -147,6 +147,8 @@ def main():
     """
     Main function to run DP-SGD training with tf.Estimator.
     """
+    mlflow.set_experiment("DP-Fraud-Detection")
+
     # Load and prepare dataset
     data = pd.read_csv("../Datos/2/Base.csv")
 
@@ -233,61 +235,119 @@ def main():
         "num_microbatches": 32,
         "learning_rate": 0.15,
     }
+    with mlflow.start_run(run_name="DP-SGD-PCA"):
+        # Log params
+        mlflow.log_param("l2_norm_clip", params["l2_norm_clip"])
+        mlflow.log_param("noise_multiplier", params["noise_multiplier"])
+        mlflow.log_param("learning_rate", params["learning_rate"])
+        mlflow.log_param("num_microbatches", params["num_microbatches"])
+        mlflow.log_param("batch_size", batch_size)
+        mlflow.log_param("epochs", total_epochs)
+        mlflow.log_param("alg", "SGD-PCA-VarSelection")
+        # Estimator
+        fraud_classifier = tf_estimator.Estimator(model_fn=model, params=params)
 
-    # Estimator
-    fraud_classifier = tf_estimator.Estimator(model_fn=model, params=params)
+        # Training loop
+        for epoch in range(1, total_epochs + 1):
+            start_time = time.time()
 
-    # Training loop
-    for epoch in range(1, total_epochs + 1):
-        start_time = time.time()
+            # Train
+            fraud_classifier.train(
+                input_fn=make_input_fn(X_train, y_train, batch_size),
+                steps=steps_per_epoch,
+            )
 
-        # Train
-        fraud_classifier.train(
-            input_fn=make_input_fn(X_train, y_train, batch_size), steps=steps_per_epoch
-        )
+            end_time = time.time()
+            print(f"Epoch {epoch}/{total_epochs} - Time: {end_time - start_time:.2f}s")
 
-        end_time = time.time()
-        print(f"Epoch {epoch}/{total_epochs} - Time: {end_time - start_time:.2f}s")
-
-        # Evaluate
-        eval_results = fraud_classifier.evaluate(
-            input_fn=make_input_fn(
-                X_test, y_test, batch_size, shuffle=False, repeat=False
-            ),
-            steps=X_test.shape[0] // batch_size,
-        )
-        print(f"Evaluation: {eval_results}")
-
-        # Classification report
-        # Classification report
-        predictions = list(
-            fraud_classifier.predict(
+            # Evaluate
+            eval_results = fraud_classifier.evaluate(
                 input_fn=make_input_fn(
                     X_test, y_test, batch_size, shuffle=False, repeat=False
+                ),
+                steps=X_test.shape[0] // batch_size,
+            )
+            print(f"Evaluation: {eval_results}")
+
+            # Classification report
+            # Classification report
+            predictions = list(
+                fraud_classifier.predict(
+                    input_fn=make_input_fn(
+                        X_test, y_test, batch_size, shuffle=False, repeat=False
+                    )
                 )
             )
-        )
 
-        y_pred = [1 if p["logits"][0] > 0.2 else 0 for p in predictions]
+            mlflow.log_metric("accuracy", eval_results["accuracy"], step=epoch)
 
-        print("\nClassification Report:")
-        print(classification_report(y_test[: len(y_pred)], y_pred, digits=4))
-        # Matriz
-        cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+            y_pred = [1 if p["logits"][0] > 0.2 else 0 for p in predictions]
 
-        print("\nConfusion Matrix:")
-        print(cm)
-        #  privacy
-        if params["noise_multiplier"] > 0:
-            epsilon = compute_epsilon(
-                epoch,
-                params["noise_multiplier"],
-                X_train.shape[0],
-                batch_size,
-                1e-6,
+            report = classification_report(
+                y_test[: len(y_pred)], y_pred, output_dict=True
             )
 
-            print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}")
+            print("\nClassification Report:")
+            print(classification_report(y_test[: len(y_pred)], y_pred, digits=4))
+
+            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+            print("\nConfusion Matrix:")
+            print(cm)
+            # Convertir la matriz a DataFrame para que se vea bien
+            cm_df = pd.DataFrame(
+                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+            )
+            # --- Pérdida ---
+            mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
+
+            # --- Accuracy (ya la tienes) ---
+            mlflow.log_metric("accuracy", float(eval_results["accuracy"]), step=epoch)
+
+            # --- Precisión, recall y f1 de cada clase ---
+            mlflow.log_metric("precision_class_0", report["0"]["precision"], step=epoch)
+            mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
+            mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
+
+            mlflow.log_metric("precision_class_1", report["1"]["precision"], step=epoch)
+            mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
+            mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
+
+            # --- Métricas agregadas (macro / weighted) ---
+            mlflow.log_metric(
+                "precision_macro", report["macro avg"]["precision"], step=epoch
+            )
+            mlflow.log_metric("recall_macro", report["macro avg"]["recall"], step=epoch)
+            mlflow.log_metric("f1_macro", report["macro avg"]["f1-score"], step=epoch)
+
+            mlflow.log_metric(
+                "precision_weighted", report["weighted avg"]["precision"], step=epoch
+            )
+            mlflow.log_metric(
+                "recall_weighted", report["weighted avg"]["recall"], step=epoch
+            )
+            mlflow.log_metric(
+                "f1_weighted", report["weighted avg"]["f1-score"], step=epoch
+            )
+            # Guardar como CSV
+            cm_csv_path = f"confusion_matrix_epoch_{epoch}.csv"
+            cm_df.to_csv(cm_csv_path)
+
+            # Subir a MLflow
+            mlflow.log_artifact(cm_csv_path)
+
+            # (Opcional) Borrar local
+            os.remove(cm_csv_path)
+            #  privacy
+            if params["noise_multiplier"] > 0:
+                epsilon = compute_epsilon(
+                    epoch,
+                    params["noise_multiplier"],
+                    X_train.shape[0],
+                    batch_size,
+                    1e-6,
+                )
+                mlflow.log_metric("epsilon", epsilon, step=epoch)
+                print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}")
 
 
 if __name__ == "__main__":

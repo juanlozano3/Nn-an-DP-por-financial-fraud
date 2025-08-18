@@ -294,38 +294,6 @@ def main():
                 y_test[: len(y_pred)], y_pred, output_dict=True
             )
 
-            # Construir un diccionario plano con todas las métricas
-            metrics_dict = {
-                "precision_class_0": report["0"]["precision"],
-                "recall_class_0": report["0"]["recall"],
-                "f1_class_0": report["0"]["f1-score"],
-                "support_class_0": report["0"]["support"],
-                "precision_class_1": report["1"]["precision"],
-                "recall_class_1": report["1"]["recall"],
-                "f1_class_1": report["1"]["f1-score"],
-                "support_class_1": report["1"]["support"],
-                "accuracy": report["accuracy"],
-                "precision_macro": report["macro avg"]["precision"],
-                "recall_macro": report["macro avg"]["recall"],
-                "f1_macro": report["macro avg"]["f1-score"],
-                "precision_weighted": report["weighted avg"]["precision"],
-                "recall_weighted": report["weighted avg"]["recall"],
-                "f1_weighted": report["weighted avg"]["f1-score"],
-            }
-
-            # Convertir a DataFrame (1 fila, múltiples columnas)
-            metrics_df = pd.DataFrame([metrics_dict])
-
-            # Guardar como CSV en el directorio actual
-            metrics_file = f"classification_metrics_epoch_{epoch}.csv"
-            metrics_df.to_csv(metrics_file, index=False)
-
-            # Subir a MLflow
-            mlflow.log_artifact(metrics_file)
-
-            # Limpiar
-            os.remove(metrics_file)
-
             print("\nClassification Report:")
             print(classification_report(y_test[: len(y_pred)], y_pred, digits=4))
 
@@ -336,7 +304,37 @@ def main():
             cm_df = pd.DataFrame(
                 cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
             )
+            # --- Pérdida ---
+            mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
 
+            # --- Accuracy (ya la tienes) ---
+            mlflow.log_metric("accuracy", float(eval_results["accuracy"]), step=epoch)
+
+            # --- Precisión, recall y f1 de cada clase ---
+            mlflow.log_metric("precision_class_0", report["0"]["precision"], step=epoch)
+            mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
+            mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
+
+            mlflow.log_metric("precision_class_1", report["1"]["precision"], step=epoch)
+            mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
+            mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
+
+            # --- Métricas agregadas (macro / weighted) ---
+            mlflow.log_metric(
+                "precision_macro", report["macro avg"]["precision"], step=epoch
+            )
+            mlflow.log_metric("recall_macro", report["macro avg"]["recall"], step=epoch)
+            mlflow.log_metric("f1_macro", report["macro avg"]["f1-score"], step=epoch)
+
+            mlflow.log_metric(
+                "precision_weighted", report["weighted avg"]["precision"], step=epoch
+            )
+            mlflow.log_metric(
+                "recall_weighted", report["weighted avg"]["recall"], step=epoch
+            )
+            mlflow.log_metric(
+                "f1_weighted", report["weighted avg"]["f1-score"], step=epoch
+            )
             # Guardar como CSV
             cm_csv_path = f"confusion_matrix_epoch_{epoch}.csv"
             cm_df.to_csv(cm_csv_path)
@@ -346,7 +344,6 @@ def main():
 
             # (Opcional) Borrar local
             os.remove(cm_csv_path)
-
             #  privacy
             if params["noise_multiplier"] > 0:
                 epsilon = compute_epsilon(

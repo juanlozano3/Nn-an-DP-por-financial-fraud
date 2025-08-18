@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/PD%20Juan%20Diego%20y%20Manuela/Algoritmos/mlruns/326363407605104692/e48ca11ac5124c63a1b6b8cd68e83857/artifacts
+end_time: 1755484922021
+entry_point_name: ''
+experiment_id: '326363407605104692'
+lifecycle_stage: active
+run_id: e48ca11ac5124c63a1b6b8cd68e83857
+run_name: DP-SGD
+run_uuid: e48ca11ac5124c63a1b6b8cd68e83857
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1755484741980
+status: 3
+tags: []
+user_id: juanl
