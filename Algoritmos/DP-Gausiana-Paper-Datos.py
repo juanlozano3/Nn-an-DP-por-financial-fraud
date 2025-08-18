@@ -258,15 +258,6 @@ def main():
         print(cm)
         #  privacy
         if params["noise_multiplier"] > 0:
-            epsilon, _ = compute_dp_sgd_privacy_lib.compute_dp_sgd_privacy(
-                n=X_train.shape[0],
-                batch_size=batch_size,
-                noise_multiplier=params["noise_multiplier"],
-                epochs=epoch,
-                delta=1e-6,
-            )
-
-            print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}, δ = 1e-5")
 
             epsilon_gdp_P = compute_epsP(
                 epoch,
@@ -276,8 +267,7 @@ def main():
                 1e-6,
             )
 
-            print("epsilon arreglado para gausiana: ")
-            print(epsilon_gdp_P)
+            print(f"DP-Gausiana Privacy after {epoch} epochs: ε = {epsilon:.2f}")
 
 
 if __name__ == "__main__":

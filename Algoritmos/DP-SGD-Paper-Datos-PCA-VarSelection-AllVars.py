@@ -154,7 +154,6 @@ def main():
     mlflow.set_experiment("DP-Fraud-Detection")
 
     data = pd.read_csv("../Datos/2/Base.csv")
-
     X = data.drop(columns=["fraud_bool"])
     y = data["fraud_bool"]
 
@@ -350,20 +349,7 @@ def main():
             os.remove(cm_csv_path)
 
             if params["noise_multiplier"] > 0:
-                epsilon, _ = compute_dp_sgd_privacy_lib.compute_dp_sgd_privacy(
-                    n=X_train.shape[0],
-                    batch_size=batch_size,
-                    noise_multiplier=params["noise_multiplier"],
-                    epochs=epoch,
-                    delta=1e-6,
-                )
-                mlflow.log_metric("epsilon", epsilon, step=epoch)
-
-                print(
-                    f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}, δ = 1e-5"
-                )
-
-                epsilon_gdp = compute_epsilon(
+                epsilon = compute_epsilon(
                     epoch,
                     params["noise_multiplier"],
                     X_train.shape[0],
@@ -371,8 +357,9 @@ def main():
                     1e-6,
                 )
 
-                print("epsilon arreglado: ")
-                print(epsilon_gdp)
+                mlflow.log_metric("epsilon", epsilon, step=epoch)
+
+                print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}")
 
 
 if __name__ == "__main__":
