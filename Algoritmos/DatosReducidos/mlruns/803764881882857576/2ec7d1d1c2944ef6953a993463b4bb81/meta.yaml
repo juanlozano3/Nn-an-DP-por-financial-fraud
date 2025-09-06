@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/Tesis%20Manuela%20y%20Juan%20Diego/Algoritmos/DatosReducidos/mlruns/803764881882857576/2ec7d1d1c2944ef6953a993463b4bb81/artifacts
+end_time: 1756913883598
+entry_point_name: ''
+experiment_id: '803764881882857576'
+lifecycle_stage: active
+run_id: 2ec7d1d1c2944ef6953a993463b4bb81
+run_name: DP-SGD
+run_uuid: 2ec7d1d1c2944ef6953a993463b4bb81
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756913820172
+status: 3
+tags: []
+user_id: juanl

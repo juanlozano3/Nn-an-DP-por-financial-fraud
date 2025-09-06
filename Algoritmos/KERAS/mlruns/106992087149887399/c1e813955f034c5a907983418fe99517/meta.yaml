@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/Tesis%20Manuela%20y%20Juan%20Diego/Algoritmos/KERAS/mlruns/106992087149887399/c1e813955f034c5a907983418fe99517/artifacts
+end_time: 1756864963085
+entry_point_name: ''
+experiment_id: '106992087149887399'
+lifecycle_stage: active
+run_id: c1e813955f034c5a907983418fe99517
+run_name: DP-SGD
+run_uuid: c1e813955f034c5a907983418fe99517
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756864680018
+status: 3
+tags: []
+user_id: juanl

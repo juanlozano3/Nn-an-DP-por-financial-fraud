@@ -19,6 +19,27 @@ from sklearn.decomposition import PCA
 from sklearn.feature_selection import VarianceThreshold
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy_lib
 
+# --- Imports compatibles para optimizador DP en Keras ---
+try:
+    # Rutas nuevas (TF-Privacy recientes)
+    from tensorflow_privacy.keras.optimizers import (
+        DPGradientDescentGaussianOptimizer as DPKerasSGDOptimizer,
+    )
+except ImportError:
+    try:
+        # Rutas "legacy" (algunas 0.8.x)
+        from tensorflow_privacy.privacy.optimizers.dp_keras_optimizer_legacy import (
+            DPKerasSGDOptimizer,
+        )
+    except ImportError:
+        # Rutas más antiguas: construir el optimizer Keras a partir de SGD
+        from tensorflow_privacy.privacy.optimizers.dp_optimizer_keras import (
+            make_keras_optimizer_class,
+        )
+
+        DPKerasSGDOptimizer = make_keras_optimizer_class(tf.keras.optimizers.SGD)
+
+
 import mlflow
 import mlflow.tensorflow
 import sys, os
@@ -63,7 +84,6 @@ def model(features, labels, mode, params):
     # --- MODO PREDICT ---
     if mode == tf_estimator.ModeKeys.PREDICT:
         return tf_estimator.EstimatorSpec(mode=mode, predictions=predictions)
-        # Expandir labels para que tengan forma (batch_size, 1)
     labels = tf.cast(labels, tf.float32)
     labels = tf.reshape(labels, (-1, 1))
 
@@ -73,14 +93,23 @@ def model(features, labels, mode, params):
     )
     vector_loss = loss_fn(y_true=labels, y_pred=logits)
 
-    scalar_loss = tf.reduce_mean(vector_loss)
+    # --- Pesos de clase desde params ---
+    w0 = tf.constant(params.get("class_weight_0", 1.0), dtype=tf.float32)
+    w1 = tf.constant(params.get("class_weight_1", 1.0), dtype=tf.float32)
+    weights = tf.where(tf.equal(labels, 1.0), w1, w0)  # (batch,1)
+    weights = tf.reshape(weights, tf.shape(vector_loss))  # (batch,)
+
+    # Aplica pesos por-ejemplo
+    weighted_vector_loss = vector_loss * weights
+    scalar_loss = tf.reduce_mean(weighted_vector_loss)
 
     # --- MÉTRICAS ---
+    # labels como int64 para la métrica
     accuracy = tf.compat.v1.metrics.accuracy(
-        labels=labels, predictions=predictions["class_ids"]
+        labels=tf.cast(tf.reshape(labels, (-1,)), tf.int64),
+        predictions=predictions["class_ids"],
     )
 
-    # --- OPTIMIZADOR DP ---
     optimizer = dp_optimizer.DPGradientDescentGaussianOptimizer(
         l2_norm_clip=params["l2_norm_clip"],
         noise_multiplier=params["noise_multiplier"],
@@ -89,7 +118,7 @@ def model(features, labels, mode, params):
     )
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
-    train_op = optimizer.minimize(loss=vector_loss, global_step=global_step)
+    train_op = optimizer.minimize(loss=weighted_vector_loss, global_step=global_step)
 
     # --- MODO TRAIN ---
     if mode == tf_estimator.ModeKeys.TRAIN:
@@ -215,9 +244,11 @@ def main():
         "noise_multiplier": 1.1,
         "num_microbatches": 32,
         "learning_rate": 0.15,
+        "class_weight_0": 0.3,
+        "class_weight_1": 0.7,
     }
 
-    with mlflow.start_run(run_name="DP-SGD-PCA-VarSelection-All"):
+    with mlflow.start_run(run_name="DP-SGD-PCA-VarSelection-All-KERAS"):
         # Log params
         mlflow.log_param("l2_norm_clip", params["l2_norm_clip"])
         mlflow.log_param("noise_multiplier", params["noise_multiplier"])
@@ -233,7 +264,6 @@ def main():
         # Training loop
         for epoch in range(1, total_epochs + 1):
             start_time = time.time()
-            class_weights = {0: 0.1, 1: 0.9}
 
             # Train
             fraud_classifier.train(
@@ -264,7 +294,7 @@ def main():
             )
             mlflow.log_metric("accuracy", eval_results["accuracy"], step=epoch)
 
-            y_pred = [1 if p["logits"][0] > 0.2 else 0 for p in predictions]
+            y_pred = [1 if p["logits"][0] > 0.5 else 0 for p in predictions]
 
             report = classification_report(
                 y_test[: len(y_pred)], y_pred, output_dict=True
@@ -318,6 +348,7 @@ def main():
             # Subir a MLflow
             mlflow.log_artifact(cm_csv_path)
 
+            # (Opcional) Borrar local
             os.remove(cm_csv_path)
             if params["noise_multiplier"] > 0:
                 epsilon = compute_epsilon(
@@ -325,7 +356,7 @@ def main():
                     params["noise_multiplier"],
                     X_train.shape[0],
                     batch_size,
-                    delta=1.0 / X_train.shape[0],
+                    1e-6,
                 )
 
                 mlflow.log_metric("epsilon", epsilon, step=epoch)

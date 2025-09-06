@@ -19,9 +19,31 @@ from sklearn.decomposition import PCA
 from sklearn.feature_selection import VarianceThreshold
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy_lib
 
+# --- Imports compatibles para optimizador DP en Keras ---
+try:
+    # Rutas nuevas (TF-Privacy recientes)
+    from tensorflow_privacy.keras.optimizers import (
+        DPGradientDescentGaussianOptimizer as DPKerasSGDOptimizer,
+    )
+except ImportError:
+    try:
+        # Rutas "legacy" (algunas 0.8.x)
+        from tensorflow_privacy.privacy.optimizers.dp_keras_optimizer_legacy import (
+            DPKerasSGDOptimizer,
+        )
+    except ImportError:
+        # Rutas más antiguas: construir el optimizer Keras a partir de SGD
+        from tensorflow_privacy.privacy.optimizers.dp_optimizer_keras import (
+            make_keras_optimizer_class,
+        )
+
+        DPKerasSGDOptimizer = make_keras_optimizer_class(tf.keras.optimizers.SGD)
+
 import mlflow
 import mlflow.tensorflow
+
 import sys, os
+
 
 GDP_REPO = "../Deep-Learning-with-GDP-Tensorflow"
 sys.path.append(GDP_REPO)
@@ -73,11 +95,21 @@ def model(features, labels, mode, params):
     )
     vector_loss = loss_fn(y_true=labels, y_pred=logits)
 
-    scalar_loss = tf.reduce_mean(vector_loss)
+    # --- Pesos de clase desde params ---
+    w0 = tf.constant(params.get("class_weight_0", 1.0), dtype=tf.float32)
+    w1 = tf.constant(params.get("class_weight_1", 1.0), dtype=tf.float32)
+    weights = tf.where(tf.equal(labels, 1.0), w1, w0)  # (batch,1)
+    weights = tf.reshape(weights, tf.shape(vector_loss))  # (batch,)
+
+    # Aplica pesos por-ejemplo
+    weighted_vector_loss = vector_loss * weights
+    scalar_loss = tf.reduce_mean(weighted_vector_loss)
 
     # --- MÉTRICAS ---
+    # labels como int64 para la métrica
     accuracy = tf.compat.v1.metrics.accuracy(
-        labels=labels, predictions=predictions["class_ids"]
+        labels=tf.cast(tf.reshape(labels, (-1,)), tf.int64),
+        predictions=predictions["class_ids"],
     )
 
     # --- OPTIMIZADOR DP ---
@@ -86,6 +118,7 @@ def model(features, labels, mode, params):
         noise_multiplier=params["noise_multiplier"],
         num_microbatches=params["num_microbatches"],
         learning_rate=params["learning_rate"],
+        unroll_microbatches=params["unroll_microbatches"],
     )
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
@@ -127,14 +160,16 @@ def main():
     """
     mlflow.set_experiment("DP-Fraud-Detection")
 
+    # Load and prepare dataset
     data = pd.read_csv("../Datos/2/Base.csv")
+    # Split features and labels
     X = data.drop(columns=["fraud_bool"])
     y = data["fraud_bool"]
 
     categorical_cols = X.select_dtypes(include=["object", "category"]).columns
     numeric_cols = X.select_dtypes(include=[np.number]).columns
 
-    # Codificar las categóricas
+    # Codificamos las categóricas
     encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
     X_cat = encoder.fit_transform(X[categorical_cols])
     # transformar las numericas
@@ -143,16 +178,8 @@ def main():
     # Combinamos con las numéricas
     X_num = X[numeric_cols].values
     X = np.hstack([X_num, X_cat])
-    # Usar PCA
-    sel = VarianceThreshold(threshold=(0.8 * (1 - 0.8)))
-    sel.fit_transform(X)
-    num_components = 15
-    pca = PCA(n_components=num_components)
-    X_pca = pca.fit_transform(X)
-    X = np.hstack([X, X_pca])
 
-    print("el largo de las variables y pca es de: ", X.shape)
-    # Separar train/test
+    # Split into train/test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
@@ -215,25 +242,22 @@ def main():
         "noise_multiplier": 1.1,
         "num_microbatches": 32,
         "learning_rate": 0.15,
+        "unroll_microbatches": False,
     }
-
-    with mlflow.start_run(run_name="DP-SGD-PCA-VarSelection-All"):
-        # Log params
+    with mlflow.start_run(run_name="DP-Gausiana"):
         mlflow.log_param("l2_norm_clip", params["l2_norm_clip"])
         mlflow.log_param("noise_multiplier", params["noise_multiplier"])
         mlflow.log_param("learning_rate", params["learning_rate"])
         mlflow.log_param("num_microbatches", params["num_microbatches"])
         mlflow.log_param("batch_size", batch_size)
         mlflow.log_param("epochs", total_epochs)
-        mlflow.log_param("PCA", num_components)
-
+        mlflow.log_param("alg", "SGD-PCA-VarSelection")
         # Estimator
         fraud_classifier = tf_estimator.Estimator(model_fn=model, params=params)
 
         # Training loop
         for epoch in range(1, total_epochs + 1):
             start_time = time.time()
-            class_weights = {0: 0.1, 1: 0.9}
 
             # Train
             fraud_classifier.train(
@@ -265,11 +289,9 @@ def main():
             mlflow.log_metric("accuracy", eval_results["accuracy"], step=epoch)
 
             y_pred = [1 if p["logits"][0] > 0.2 else 0 for p in predictions]
-
             report = classification_report(
                 y_test[: len(y_pred)], y_pred, output_dict=True
             )
-
             print("\nClassification Report:")
             print(classification_report(y_test[: len(y_pred)], y_pred, digits=4))
 
@@ -318,19 +340,20 @@ def main():
             # Subir a MLflow
             mlflow.log_artifact(cm_csv_path)
 
+            # (Opcional) Borrar local
             os.remove(cm_csv_path)
+            #  privacy
             if params["noise_multiplier"] > 0:
-                epsilon = compute_epsilon(
+
+                epsilon = compute_epsP(
                     epoch,
                     params["noise_multiplier"],
                     X_train.shape[0],
                     batch_size,
                     delta=1.0 / X_train.shape[0],
                 )
-
                 mlflow.log_metric("epsilon", epsilon, step=epoch)
-
-                print(f"DP-SGD Privacy after {epoch} epochs: ε = {epsilon:.2f}")
+                print(f"DP-Gausiana Privacy after {epoch} epochs: ε = {epsilon:.2f}")
 
 
 if __name__ == "__main__":
