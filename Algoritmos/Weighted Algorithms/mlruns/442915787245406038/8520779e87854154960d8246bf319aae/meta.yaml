@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/Tesis%20Manuela%20y%20Juan%20Diego/Algoritmos/Weighted%20Algorithms/mlruns/442915787245406038/8520779e87854154960d8246bf319aae/artifacts
+end_time: 1757471278457
+entry_point_name: ''
+experiment_id: '442915787245406038'
+lifecycle_stage: active
+run_id: 8520779e87854154960d8246bf319aae
+run_name: DP-SGD
+run_uuid: 8520779e87854154960d8246bf319aae
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1757471109328
+status: 3
+tags: []
+user_id: juanl
