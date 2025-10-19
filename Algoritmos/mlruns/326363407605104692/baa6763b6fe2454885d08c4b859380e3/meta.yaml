@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/PD%20Juan%20Diego%20y%20Manuela/Algoritmos/mlruns/326363407605104692/baa6763b6fe2454885d08c4b859380e3/artifacts
+end_time: 1759892001075
+entry_point_name: ''
+experiment_id: '326363407605104692'
+lifecycle_stage: active
+run_id: baa6763b6fe2454885d08c4b859380e3
+run_name: DP-Gausiana
+run_uuid: baa6763b6fe2454885d08c4b859380e3
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1759891836430
+status: 3
+tags: []
+user_id: juanl

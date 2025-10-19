@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/Tesis%20Manuela%20y%20Juan%20Diego/Algoritmos/Finales/mlruns/383373066811607545/694a4b6282e44e619fe5701878ffadf9/artifacts
+end_time: 1759901377819
+entry_point_name: ''
+experiment_id: '383373066811607545'
+lifecycle_stage: active
+run_id: 694a4b6282e44e619fe5701878ffadf9
+run_name: DP-Gausiana
+run_uuid: 694a4b6282e44e619fe5701878ffadf9
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1759901200666
+status: 3
+tags: []
+user_id: juanl

@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/juanl/Documents/Tesis%20Manuela%20y%20Juan%20Diego/Algoritmos/Finales/mlruns/383373066811607545/4b7301b11a4c4aa0ad46ec13d1a7f932/artifacts
+end_time: 1759932873226
+entry_point_name: ''
+experiment_id: '383373066811607545'
+lifecycle_stage: active
+run_id: 4b7301b11a4c4aa0ad46ec13d1a7f932
+run_name: DP-HPO
+run_uuid: 4b7301b11a4c4aa0ad46ec13d1a7f932
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1759932873208
+status: 3
+tags: []
+user_id: juanl

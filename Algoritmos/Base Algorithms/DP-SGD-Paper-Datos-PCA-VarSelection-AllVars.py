@@ -53,7 +53,6 @@ def model(features, labels, mode, params):
 
     # Forward pass: logits = salida sin activar
     logits = model(features["x"])
-
     # Definir predicciones (para modo PREDICT)
     predictions = {
         "class_ids": tf.cast(logits > 0.2, tf.int64),
