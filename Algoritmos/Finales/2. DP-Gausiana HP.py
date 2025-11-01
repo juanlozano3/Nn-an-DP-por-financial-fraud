@@ -345,7 +345,7 @@ def main():
                     input_fn=eval_input, steps=eval_steps
                 )
 
-                # MLflow logs (igual que ya tienes)
+                # MLflow logs - solo métricas básicas cada epoch (optimización 3)
                 mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
                 mlflow.log_metric(
                     "accuracy", float(eval_results["accuracy"]), step=epoch
@@ -353,40 +353,35 @@ def main():
                 mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
-                preds = list(fraud_classifier.predict(input_fn=eval_input))
-                y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
-                report = classification_report(
-                    y_test[: len(y_pred)], y_pred, output_dict=True
-                )
+                # Métricas detalladas solo cada 5 épocas o en la última (optimización 3)
+                log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
+                
+                if log_detailed:
+                    preds = list(fraud_classifier.predict(input_fn=eval_input))
+                    y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+                    report = classification_report(
+                        y_test[: len(y_pred)], y_pred, output_dict=True
+                    )
 
-                mlflow.log_metric(
-                    "precision_class_0", report["0"]["precision"], step=epoch
-                )
-                mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
-                mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
-                mlflow.log_metric(
-                    "precision_class_1", report["1"]["precision"], step=epoch
-                )
-                mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
-                mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
-                mlflow.log_metric(
-                    "precision_macro", report["macro avg"]["precision"], step=epoch
-                )
-                mlflow.log_metric(
-                    "recall_macro", report["macro avg"]["recall"], step=epoch
-                )
-                mlflow.log_metric(
-                    "f1_macro", report["macro avg"]["f1-score"], step=epoch
-                )
-
-                cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
-                cm_df = pd.DataFrame(
-                    cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-                )
-                cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_epoch{epoch}.csv"
-                cm_df.to_csv(cm_csv_path)
-                mlflow.log_artifact(cm_csv_path)
-                os.remove(cm_csv_path)
+                    mlflow.log_metric(
+                        "precision_class_0", report["0"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
+                    mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
+                    mlflow.log_metric(
+                        "precision_class_1", report["1"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
+                    mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
+                    mlflow.log_metric(
+                        "precision_macro", report["macro avg"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric(
+                        "recall_macro", report["macro avg"]["recall"], step=epoch
+                    )
+                    mlflow.log_metric(
+                        "f1_macro", report["macro avg"]["f1-score"], step=epoch
+                    )
 
                 if noise > 0:
                     epsilon = compute_epsP(
@@ -402,6 +397,44 @@ def main():
                         break
                 else:
                     epsilon = 0.0
+            
+            # Optimización 1 y 2: Predict, classification_report y confusion matrix solo al final del trial
+            preds = list(fraud_classifier.predict(input_fn=eval_input))
+            y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+            report = classification_report(
+                y_test[: len(y_pred)], y_pred, output_dict=True
+            )
+            
+            # Log métricas finales detalladas
+            mlflow.log_metric(
+                "precision_class_0_final", report["0"]["precision"]
+            )
+            mlflow.log_metric("recall_class_0_final", report["0"]["recall"])
+            mlflow.log_metric("f1_class_0_final", report["0"]["f1-score"])
+            mlflow.log_metric(
+                "precision_class_1_final", report["1"]["precision"]
+            )
+            mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
+            mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
+            mlflow.log_metric(
+                "precision_macro_final", report["macro avg"]["precision"]
+            )
+            mlflow.log_metric(
+                "recall_macro_final", report["macro avg"]["recall"]
+            )
+            mlflow.log_metric(
+                "f1_macro_final", report["macro avg"]["f1-score"]
+            )
+            
+            # Confusion matrix solo al final (optimización 2)
+            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+            cm_df = pd.DataFrame(
+                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+            )
+            cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_final.csv"
+            cm_df.to_csv(cm_csv_path)
+            mlflow.log_artifact(cm_csv_path)
+            os.remove(cm_csv_path)
 
             # criterio de selección del trial: usar val_loss (minimizar pérdida)
             trial_score = -float(eval_results["loss"])  # Negativo porque buscamos mínimo pérdida
