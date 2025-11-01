@@ -14,6 +14,8 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
+import mlflow
+import mlflow.tensorflow
 
 # =========================
 # Semillas (reproducibilidad)
@@ -230,73 +232,158 @@ print(
 )
 print("=" * 60)
 
-for opt_name in OPTIMIZERS:
-    for d1 in DROPOUT1_CANDIDATES:
-        for d2 in DROPOUT2_CANDIDATES:
-            for ep in EPOCHS_CANDIDATES:
-                model = build_model(
-                    X_train.shape[1],
-                    optimizer_type=opt_name,
-                    lr=LEARNING_RATE,
-                    dropout1=d1,
-                    dropout2=d2,
-                )
+# =========================
+# Configurar MLflow
+# =========================
+mlflow.set_experiment("DP-Fraud-Detection-Final")
 
-                # Para GD (Gradient Descent), usar batch_size completo
-                batch_size = len(X_train) if opt_name.lower() == "gd" else BATCH_SIZE
+# Run principal para el grid search
+with mlflow.start_run(run_name="Grid_Search_Optimizer_Dropout"):
+    mlflow.log_param("architecture_units1", UNITS1)
+    mlflow.log_param("architecture_units2", UNITS2)
+    mlflow.log_param("l2_regularization", L2_REG)
+    mlflow.log_param("learning_rate", LEARNING_RATE)
+    mlflow.log_param("batch_size", BATCH_SIZE)
+    mlflow.log_param("val_split", VAL_SPLIT)
 
-                hist = model.fit(
-                    X_train,
-                    y_train,
-                    epochs=ep,
-                    batch_size=batch_size,
-                    validation_split=VAL_SPLIT,
-                    callbacks=[stop_early, reduce_lr],
-                    verbose=0,
-                )
+    for opt_name in OPTIMIZERS:
+        for d1 in DROPOUT1_CANDIDATES:
+            for d2 in DROPOUT2_CANDIDATES:
+                for ep in EPOCHS_CANDIDATES:
+                    # Run anidado para cada trial
+                    run_name = f"opt={opt_name}_d1={d1:.1f}_d2={d2:.1f}_ep={ep}"
+                    with mlflow.start_run(run_name=run_name, nested=True):
+                        # Log parámetros del trial
+                        mlflow.log_param("optimizer", opt_name.upper())
+                        mlflow.log_param("dropout1", d1)
+                        mlflow.log_param("dropout2", d2)
+                        mlflow.log_param("epochs", ep)
 
-                # Seleccionar mejor epoch por val_loss (mínimo)
-                val_loss_history = hist.history["val_loss"]
-                best_epoch_idx = int(np.argmin(val_loss_history))
-                best_val_loss = float(val_loss_history[best_epoch_idx])
+                        model = build_model(
+                            X_train.shape[1],
+                            optimizer_type=opt_name,
+                            lr=LEARNING_RATE,
+                            dropout1=d1,
+                            dropout2=d2,
+                        )
 
-                val_acc = float(hist.history["val_accuracy"][best_epoch_idx])
-                train_acc = float(hist.history["accuracy"][best_epoch_idx])
-                train_loss = float(hist.history["loss"][best_epoch_idx])
+                        # Para GD (Gradient Descent), usar batch_size completo
+                        batch_size = (
+                            len(X_train) if opt_name.lower() == "gd" else BATCH_SIZE
+                        )
+                        mlflow.log_param("batch_size", batch_size)
 
-                # Guardar resultados
-                results.append(
-                    {
-                        "optimizer": opt_name.upper(),
-                        "dropout1": d1,
-                        "dropout2": d2,
-                        "epochs": ep,
-                        "best_epoch": best_epoch_idx + 1,
-                        "batch_size": batch_size,
-                        "train_loss": train_loss,
-                        "train_acc": train_acc,
-                        "val_loss": best_val_loss,
-                        "val_acc": val_acc,
-                    }
-                )
+                        hist = model.fit(
+                            X_train,
+                            y_train,
+                            epochs=ep,
+                            batch_size=batch_size,
+                            validation_split=VAL_SPLIT,
+                            callbacks=[stop_early, reduce_lr],
+                            verbose=0,
+                        )
 
-                print(
-                    f"Opt={opt_name.upper():<4} | D1={d1:.1f} | D2={d2:.1f} | "
-                    f"Ep={ep:>2} | Best_Ep={best_epoch_idx+1:>2} | "
-                    f"Val_Loss={best_val_loss:.4f} | Val_Acc={val_acc:.4f}"
-                )
+                        # Log métricas por epoch
+                        for epoch_idx, (
+                            train_loss_ep,
+                            val_loss_ep,
+                            train_acc_ep,
+                            val_acc_ep,
+                        ) in enumerate(
+                            zip(
+                                hist.history["loss"],
+                                hist.history["val_loss"],
+                                hist.history["accuracy"],
+                                hist.history["val_accuracy"],
+                            ),
+                            start=1,
+                        ):
+                            mlflow.log_metric(
+                                "train_loss", float(train_loss_ep), step=epoch_idx
+                            )
+                            mlflow.log_metric(
+                                "val_loss", float(val_loss_ep), step=epoch_idx
+                            )
+                            mlflow.log_metric(
+                                "train_accuracy", float(train_acc_ep), step=epoch_idx
+                            )
+                            mlflow.log_metric(
+                                "val_accuracy", float(val_acc_ep), step=epoch_idx
+                            )
 
-                # Actualizar mejor si mejora val_loss (mínimo)
-                if best_val_loss < best["val_loss"]:
-                    best.update(
-                        {
-                            "val_loss": best_val_loss,
-                            "optimizer": opt_name,
-                            "dropout1": d1,
-                            "dropout2": d2,
-                            "epochs": ep,
-                        }
-                    )
+                            # Log otras métricas si están disponibles
+                            if "val_auprc" in hist.history:
+                                mlflow.log_metric(
+                                    "val_auprc",
+                                    float(hist.history["val_auprc"][epoch_idx - 1]),
+                                    step=epoch_idx,
+                                )
+                            if "val_auroc" in hist.history:
+                                mlflow.log_metric(
+                                    "val_auroc",
+                                    float(hist.history["val_auroc"][epoch_idx - 1]),
+                                    step=epoch_idx,
+                                )
+
+                        # Seleccionar mejor epoch por val_loss (mínimo)
+                        val_loss_history = hist.history["val_loss"]
+                        best_epoch_idx = int(np.argmin(val_loss_history))
+                        best_val_loss = float(val_loss_history[best_epoch_idx])
+
+                        val_acc = float(hist.history["val_accuracy"][best_epoch_idx])
+                        train_acc = float(hist.history["accuracy"][best_epoch_idx])
+                        train_loss = float(hist.history["loss"][best_epoch_idx])
+
+                        # Log métricas del mejor epoch como métricas finales del trial
+                        mlflow.log_metric("best_epoch", best_epoch_idx + 1)
+                        mlflow.log_metric("best_val_loss", best_val_loss)
+                        mlflow.log_metric("best_val_accuracy", val_acc)
+                        mlflow.log_metric("train_loss_best_epoch", train_loss)
+                        mlflow.log_metric("train_accuracy_best_epoch", train_acc)
+
+                        # Guardar resultados
+                        results.append(
+                            {
+                                "optimizer": opt_name.upper(),
+                                "dropout1": d1,
+                                "dropout2": d2,
+                                "epochs": ep,
+                                "best_epoch": best_epoch_idx + 1,
+                                "batch_size": batch_size,
+                                "train_loss": train_loss,
+                                "train_acc": train_acc,
+                                "val_loss": best_val_loss,
+                                "val_acc": val_acc,
+                            }
+                        )
+
+                        print(
+                            f"Opt={opt_name.upper():<4} | D1={d1:.1f} | D2={d2:.1f} | "
+                            f"Ep={ep:>2} | Best_Ep={best_epoch_idx+1:>2} | "
+                            f"Val_Loss={best_val_loss:.4f} | Val_Acc={val_acc:.4f}"
+                        )
+
+                        # Actualizar mejor si mejora val_loss (mínimo)
+                        if best_val_loss < best["val_loss"]:
+                            best.update(
+                                {
+                                    "val_loss": best_val_loss,
+                                    "optimizer": opt_name,
+                                    "dropout1": d1,
+                                    "dropout2": d2,
+                                    "epochs": ep,
+                                }
+                            )
+
+    # Log mejor combinación encontrada al finalizar grid search
+    mlflow.log_param("best_optimizer", best["optimizer"].upper())
+    mlflow.log_param("best_dropout1", best["dropout1"])
+    mlflow.log_param("best_dropout2", best["dropout2"])
+    mlflow.log_param("best_epochs", best["epochs"])
+    mlflow.log_metric("best_val_loss_found", best["val_loss"])
+
+    # Guardar CSV de resultados como artifact
+    mlflow.log_artifact("optimizer_search_results.csv")
 
 
 # Convertir resultados a DataFrame y ordenar por val_loss (ascendente)
@@ -329,6 +416,7 @@ print(f"Dropout2: {best['dropout2']:.2f}")
 print(f"Épocas: {best['epochs']}")
 print(f"Val Loss: {best['val_loss']:.4f}")
 print("=" * 60)
+
 # =========================
 # Re-entrenar con la mejor combinación y evaluar en TEST
 # =========================
@@ -336,87 +424,168 @@ print("\n" + "=" * 60)
 print("ENTRENAMIENTO FINAL CON MEJOR OPTIMIZADOR")
 print("=" * 60)
 
-best_model = build_model(
-    X_train.shape[1],
-    optimizer_type=best["optimizer"],
-    lr=LEARNING_RATE,
-    dropout1=best["dropout1"],
-    dropout2=best["dropout2"],
-)
+# Run final para entrenamiento y evaluación
+with mlflow.start_run(run_name="FINAL_Best_Model"):
+    # Log parámetros finales
+    mlflow.log_param("optimizer", best["optimizer"].upper())
+    mlflow.log_param("dropout1", best["dropout1"])
+    mlflow.log_param("dropout2", best["dropout2"])
+    mlflow.log_param("epochs", best["epochs"])
+    mlflow.log_param("learning_rate", LEARNING_RATE)
+    mlflow.log_param("l2_regularization", L2_REG)
+    mlflow.log_param("architecture_units1", UNITS1)
+    mlflow.log_param("architecture_units2", UNITS2)
 
-# Batch size según optimizador
-final_batch_size = len(X_train) if best["optimizer"].lower() == "gd" else BATCH_SIZE
+    best_model = build_model(
+        X_train.shape[1],
+        optimizer_type=best["optimizer"],
+        lr=LEARNING_RATE,
+        dropout1=best["dropout1"],
+        dropout2=best["dropout2"],
+    )
 
-best_model.fit(
-    X_train,
-    y_train,
-    epochs=best["epochs"],
-    batch_size=final_batch_size,
-    validation_split=VAL_SPLIT,
-    callbacks=[stop_early, reduce_lr],
-    verbose=1,
-)
+    # Batch size según optimizador
+    final_batch_size = len(X_train) if best["optimizer"].lower() == "gd" else BATCH_SIZE
+    mlflow.log_param("batch_size", final_batch_size)
 
-# =========================
-# Evaluación en TEST (no usado durante búsqueda)
-# =========================
-test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
-print(f"\n>>> EVALUACIÓN EN TEST (conjunto no visto durante búsqueda):")
-print(f"    Test loss: {test_loss:.4f}")
-print(f"    Test accuracy: {test_acc:.4f}")
+    history_final = best_model.fit(
+        X_train,
+        y_train,
+        epochs=best["epochs"],
+        batch_size=final_batch_size,
+        validation_split=VAL_SPLIT,
+        callbacks=[stop_early, reduce_lr],
+        verbose=1,
+    )
 
-# Predicciones
-y_pred_prob = best_model.predict(X_test, verbose=0).ravel()
+    # Log métricas del entrenamiento final
+    for epoch_idx, (train_loss_ep, val_loss_ep, train_acc_ep, val_acc_ep) in enumerate(
+        zip(
+            history_final.history["loss"],
+            history_final.history["val_loss"],
+            history_final.history["accuracy"],
+            history_final.history["val_accuracy"],
+        ),
+        start=1,
+    ):
+        mlflow.log_metric("final_train_loss", float(train_loss_ep), step=epoch_idx)
+        mlflow.log_metric("final_val_loss", float(val_loss_ep), step=epoch_idx)
+        mlflow.log_metric("final_train_accuracy", float(train_acc_ep), step=epoch_idx)
+        mlflow.log_metric("final_val_accuracy", float(val_acc_ep), step=epoch_idx)
 
+    # =========================
+    # Evaluación en TEST (no usado durante búsqueda)
+    # =========================
+    test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
+    print(f"\n>>> EVALUACIÓN EN TEST (conjunto no visto durante búsqueda):")
+    print(f"    Test loss: {test_loss:.4f}")
+    print(f"    Test accuracy: {test_acc:.4f}")
 
-# =========================
-# Buscar mejor umbral para maximizar F1 de clase 1
-# =========================
-def find_best_threshold(y_true, y_scores, metric="f1", cls=1, n_steps=99):
-    """Busca el umbral que maximiza precision/recall/f1 para la clase positiva."""
-    best_thr, best_prec, best_rec, best_f1 = 0.5, 0.0, 0.0, 0.0
-    for thr in np.linspace(0.01, 0.99, n_steps):
-        y_pred = (y_scores >= thr).astype(int)
-        prec, rec, f1, _ = precision_recall_fscore_support(
-            y_true, y_pred, average=None, zero_division=0
-        )
-        p, r, f = prec[cls], rec[cls], f1[cls]
-        score = {"precision": p, "recall": r, "f1": f}[metric]
-        if score > {"precision": best_prec, "recall": best_rec, "f1": best_f1}[metric]:
-            best_thr, best_prec, best_rec, best_f1 = thr, p, r, f
-    return best_thr, best_prec, best_rec, best_f1
+    # Log métricas de test
+    mlflow.log_metric("test_loss", float(test_loss))
+    mlflow.log_metric("test_accuracy", float(test_acc))
 
+    # Predicciones
+    y_pred_prob = best_model.predict(X_test, verbose=0).ravel()
 
-# NOTA: Buscar umbral en validación para evitar data leakage
-# Para este código, usamos test pero idealmente debería ser validation split
-# TODO: Implementar split explícito train/val/test en futuras versiones
-best_thr, best_prec, best_rec, best_f1 = find_best_threshold(
-    y_test, y_pred_prob, metric="f1", cls=1
-)
+    # =========================
+    # Buscar mejor umbral para maximizar F1 de clase 1
+    # =========================
+    def find_best_threshold(y_true, y_scores, metric="f1", cls=1, n_steps=99):
+        """Busca el umbral que maximiza precision/recall/f1 para la clase positiva."""
+        best_thr, best_prec, best_rec, best_f1 = 0.5, 0.0, 0.0, 0.0
+        for thr in np.linspace(0.01, 0.99, n_steps):
+            y_pred = (y_scores >= thr).astype(int)
+            prec, rec, f1, _ = precision_recall_fscore_support(
+                y_true, y_pred, average=None, zero_division=0
+            )
+            p, r, f = prec[cls], rec[cls], f1[cls]
+            score = {"precision": p, "recall": r, "f1": f}[metric]
+            if (
+                score
+                > {"precision": best_prec, "recall": best_rec, "f1": best_f1}[metric]
+            ):
+                best_thr, best_prec, best_rec, best_f1 = thr, p, r, f
+        return best_thr, best_prec, best_rec, best_f1
 
-# Predicciones con umbral 0.2 (original)
-y_pred_02 = (y_pred_prob >= 0.2).astype(int)
-# Predicciones con umbral óptimo
-y_pred_optimal = (y_pred_prob >= best_thr).astype(int)
+    # NOTA: Buscar umbral en validación para evitar data leakage
+    # Para este código, usamos test pero idealmente debería ser validation split
+    # TODO: Implementar split explícito train/val/test en futuras versiones
+    best_thr, best_prec, best_rec, best_f1 = find_best_threshold(
+        y_test, y_pred_prob, metric="f1", cls=1
+    )
 
-print("\n" + "=" * 60)
-print("MÉTRICAS CON UMBRAL 0.2 (original):")
-print("=" * 60)
-print(classification_report(y_test, y_pred_02, digits=4))
-cm_02 = confusion_matrix(y_test, y_pred_02)
-print("Confusion Matrix (umbral=0.2):")
-print(cm_02)
+    # Predicciones con umbral 0.2 (original)
+    y_pred_02 = (y_pred_prob >= 0.2).astype(int)
+    # Predicciones con umbral óptimo
+    y_pred_optimal = (y_pred_prob >= best_thr).astype(int)
 
-print("\n" + "=" * 60)
-print(f"MÉTRICAS CON UMBRAL ÓPTIMO (F1): {best_thr:.3f}")
-print("=" * 60)
-print(classification_report(y_test, y_pred_optimal, digits=4))
-print(
-    f"Precisión(1): {best_prec:.4f} | Recall(1): {best_rec:.4f} | F1(1): {best_f1:.4f}"
-)
-cm_optimal = confusion_matrix(y_test, y_pred_optimal)
-print("Confusion Matrix (umbral óptimo):")
-print(cm_optimal)
+    print("\n" + "=" * 60)
+    print("MÉTRICAS CON UMBRAL 0.2 (original):")
+    print("=" * 60)
+    report_02 = classification_report(y_test, y_pred_02, digits=4, output_dict=True)
+    print(classification_report(y_test, y_pred_02, digits=4))
+    cm_02 = confusion_matrix(y_test, y_pred_02)
+    print("Confusion Matrix (umbral=0.2):")
+    print(cm_02)
+
+    # Log métricas con umbral 0.2
+    mlflow.log_metric("test_precision_class_0_02", report_02["0"]["precision"])
+    mlflow.log_metric("test_recall_class_0_02", report_02["0"]["recall"])
+    mlflow.log_metric("test_f1_class_0_02", report_02["0"]["f1-score"])
+    mlflow.log_metric("test_precision_class_1_02", report_02["1"]["precision"])
+    mlflow.log_metric("test_recall_class_1_02", report_02["1"]["recall"])
+    mlflow.log_metric("test_f1_class_1_02", report_02["1"]["f1-score"])
+
+    # Guardar matriz de confusión con umbral 0.2
+    cm_02_df = pd.DataFrame(
+        cm_02, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+    )
+    cm_02_path = "confusion_matrix_threshold_02.csv"
+    cm_02_df.to_csv(cm_02_path)
+    mlflow.log_artifact(cm_02_path)
+    os.remove(cm_02_path)
+
+    print("\n" + "=" * 60)
+    print(f"MÉTRICAS CON UMBRAL ÓPTIMO (F1): {best_thr:.3f}")
+    print("=" * 60)
+    report_optimal = classification_report(
+        y_test, y_pred_optimal, digits=4, output_dict=True
+    )
+    print(classification_report(y_test, y_pred_optimal, digits=4))
+    print(
+        f"Precisión(1): {best_prec:.4f} | Recall(1): {best_rec:.4f} | F1(1): {best_f1:.4f}"
+    )
+    cm_optimal = confusion_matrix(y_test, y_pred_optimal)
+    print("Confusion Matrix (umbral óptimo):")
+    print(cm_optimal)
+
+    # Log métricas con umbral óptimo
+    mlflow.log_param("optimal_threshold", best_thr)
+    mlflow.log_metric(
+        "test_precision_class_0_optimal", report_optimal["0"]["precision"]
+    )
+    mlflow.log_metric("test_recall_class_0_optimal", report_optimal["0"]["recall"])
+    mlflow.log_metric("test_f1_class_0_optimal", report_optimal["0"]["f1-score"])
+    mlflow.log_metric("test_precision_class_1_optimal", best_prec)
+    mlflow.log_metric("test_recall_class_1_optimal", best_rec)
+    mlflow.log_metric("test_f1_class_1_optimal", best_f1)
+    mlflow.log_metric(
+        "test_precision_macro_optimal", report_optimal["macro avg"]["precision"]
+    )
+    mlflow.log_metric(
+        "test_recall_macro_optimal", report_optimal["macro avg"]["recall"]
+    )
+    mlflow.log_metric("test_f1_macro_optimal", report_optimal["macro avg"]["f1-score"])
+
+    # Guardar matriz de confusión con umbral óptimo
+    cm_optimal_df = pd.DataFrame(
+        cm_optimal, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+    )
+    cm_optimal_path = "confusion_matrix_threshold_optimal.csv"
+    cm_optimal_df.to_csv(cm_optimal_path)
+    mlflow.log_artifact(cm_optimal_path)
+    os.remove(cm_optimal_path)
 
 print("\n" + "=" * 60)
 print("RESUMEN FINAL:")
