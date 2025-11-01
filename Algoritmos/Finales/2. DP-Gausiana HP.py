@@ -10,6 +10,7 @@ from tensorflow import estimator as tf_estimator
 
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy
 from tensorflow_privacy.privacy.optimizers import dp_optimizer
+from tensorflow_privacy.privacy.dp_query import gaussian_query
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -108,9 +109,15 @@ def model(features, labels, mode, params):
     )
 
     # --- OPTIMIZADOR DP ---
-    optimizer = dp_optimizer.DPGradientDescentOptimizer(
+    # Calculate stddev for Gaussian noise: stddev = l2_norm_clip * noise_multiplier
+    stddev = params["l2_norm_clip"] * params["noise_multiplier"]
+    dp_sum_query = gaussian_query.GaussianSumQuery(
         l2_norm_clip=params["l2_norm_clip"],
-        noise_multiplier=params["noise_multiplier"],
+        stddev=stddev
+    )
+    
+    optimizer = dp_optimizer.DPGradientDescentOptimizer(
+        dp_sum_query,
         num_microbatches=params["num_microbatches"],
         learning_rate=params["learning_rate"],
         unroll_microbatches=params["unroll_microbatches"],
