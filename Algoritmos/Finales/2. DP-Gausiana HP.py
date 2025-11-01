@@ -275,9 +275,11 @@ def main():
         eval_input = make_eval_input()
         eval_steps = max(1, X_test.shape[0] // batch_size)
 
+    trial_num = 0
     for clip, noise, lr, threshold, total_epochs in tqdm(
         grid_combos, desc="HPO trials", unit="trial"
     ):
+        trial_num += 1
         trial_params = {
             "l2_norm_clip": clip,
             "noise_multiplier": noise,
@@ -390,14 +392,46 @@ def main():
             trial_score = -float(eval_results["loss"])  # Negativo porque buscamos mínimo pérdida
             mlflow.log_metric("trial_score", -trial_score)  # Log como pérdida positiva
             mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
-
-            if trial_score > best["score"]:  # Mayor score = menor pérdida (porque es negativo)
+            
+            # Obtener métricas finales del trial
+            final_auprc = float(eval_results["auprc"])
+            final_auroc = float(eval_results["auroc"])
+            final_acc = float(eval_results["accuracy"])
+            final_loss = float(eval_results["loss"])
+            final_epsilon = epsilon if noise > 0 else 0.0
+            
+            # Determinar si es el mejor
+            is_best = trial_score > best["score"]
+            if is_best:  # Mayor score = menor pérdida (porque es negativo)
                 best["score"] = trial_score
                 best["params"] = trial_params
                 best["epochs"] = epoch  # Usar epoch actual en caso de early stopping
                 best["val_loss"] = float(eval_results["loss"])
-
-            print(f"\n>> Best (by val_loss): loss={best.get('val_loss', 'N/A'):.4f}, epoch={best['epochs']}")
+            
+            # Imprimir resultados del trial de forma clara y detallada
+            print("\n" + "="*80)
+            print(f"TRIAL {trial_num}/{total_trials} COMPLETADO")
+            print("="*80)
+            print(f"Hiperparámetros:")
+            print(f"  • L2 Norm Clip:     {clip}")
+            print(f"  • Noise Multiplier:  {noise}")
+            print(f"  • Learning Rate:     {lr}")
+            print(f"  • Threshold:         {threshold}")
+            print(f"  • Epochs:            {epoch}/{total_epochs}")
+            print(f"\nMétricas Finales del Trial:")
+            print(f"  • Val Loss:          {final_loss:.4f}")
+            print(f"  • AUPRC:             {final_auprc:.4f}")
+            print(f"  • AUROC:             {final_auroc:.4f}")
+            print(f"  • Accuracy:          {final_acc:.4f}")
+            if noise > 0:
+                print(f"  • Epsilon (ε):       {final_epsilon:.4f}")
+            print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}")
+            if is_best:
+                print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)")
+            else:
+                print(f"  Val Loss actual:      {final_loss:.4f}")
+                print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}")
+            print("="*80)
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
