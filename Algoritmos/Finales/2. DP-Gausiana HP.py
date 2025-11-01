@@ -155,7 +155,7 @@ def main():
     """
     Main function to run DP-SGD training with tf.Estimator.
     """
-    mlflow.set_experiment("DP-Fraud-Detection")
+    mlflow.set_experiment("DP-Fraud-Detection-Final")
 
     # Load and prepare dataset
     data = pd.read_csv("../../Datos/2/Base.csv")
