@@ -118,6 +118,8 @@ def model(features, labels, mode, params):
     
     optimizer = dp_optimizer.DPGradientDescentOptimizer(
         dp_sum_query,
+        l2_norm_clip=params["l2_norm_clip"],
+        noise_multiplier=params["noise_multiplier"],
         num_microbatches=params["num_microbatches"],
         learning_rate=params["learning_rate"],
         unroll_microbatches=params["unroll_microbatches"],
@@ -232,7 +234,6 @@ def main():
 
     # Training params
     batch_size = 256
-    total_epochs = 5
     steps_per_epoch = X_train.shape[0] // batch_size
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
@@ -241,7 +242,7 @@ def main():
     NOISE_GRID = [0.5, 0.8, 1.0, 1.1, 1.5]
     LR_GRID = [0.01, 0.05, 0.1, 0.15, 0.25, 0.3]
     THRESHOLD_GRID = [0.1, 0.2, 0.3, 0.4, 0.5]
-    EPOCHS_GRID = [5]
+    EPOCHS_GRID = [10, 15, 20, 25, 30]  # Rango de épocas entre 10 y 30
     grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
     total_trials = len(grid_combos)
     print(f"Total number of hyperparameter combinations: {total_trials}")
