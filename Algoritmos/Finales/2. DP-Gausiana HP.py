@@ -246,13 +246,15 @@ def main():
     total_trials = len(grid_combos)
     print(f"Total number of hyperparameter combinations: {total_trials}")
 
-    best = {"score": -float("inf"), "params": None, "epochs": None}
+    best = {"score": -float("inf"), "params": None, "epochs": None, "val_loss": float("inf")}
 
     with mlflow.start_run(run_name="DP-HPO"):
         # Log contexto de dataset
         mlflow.log_param("n_train", int(X_train.shape[0]))
         mlflow.log_param("n_test", int(X_test.shape[0]))
         mlflow.log_param("batch_size", 256)  # lo usas abajo
+        mlflow.log_param("selection_metric", "val_loss")  # Métrica usada para selección del mejor modelo
+        mlflow.log_param("epsilon_threshold", 5.0)  # Threshold para early stopping
 
         # Prepara input fns (reutilizables)
         batch_size = 256
@@ -372,17 +374,29 @@ def main():
                         epoch, noise, X_train.shape[0], batch_size, 1e-6
                     )
                     mlflow.log_metric("epsilon", epsilon, step=epoch)
+                    
+                    # Early stopping si epsilon > 5
+                    if epsilon > 5.0:
+                        print(f"\n>> Early stopping: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}")
+                        mlflow.log_param("early_stopped", True)
+                        mlflow.log_param("early_stop_epoch", epoch)
+                        mlflow.log_param("early_stop_reason", "epsilon > 5.0")
+                        break
+                else:
+                    epsilon = 0.0
 
-            # criterio de selección del trial (igual que tenías)
-            trial_score = float(eval_results["auprc"])
-            mlflow.log_metric("trial_score", trial_score)
+            # criterio de selección del trial: usar val_loss (minimizar pérdida)
+            trial_score = -float(eval_results["loss"])  # Negativo porque buscamos mínimo pérdida
+            mlflow.log_metric("trial_score", -trial_score)  # Log como pérdida positiva
+            mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
 
-            if trial_score > best["score"]:
+            if trial_score > best["score"]:  # Mayor score = menor pérdida (porque es negativo)
                 best["score"] = trial_score
                 best["params"] = trial_params
-                best["epochs"] = total_epochs
+                best["epochs"] = epoch  # Usar epoch actual en caso de early stopping
+                best["val_loss"] = float(eval_results["loss"])
 
-            print("\n>> Best (by AUPRC):", best)
+            print(f"\n>> Best (by val_loss): loss={best.get('val_loss', 'N/A'):.4f}, epoch={best['epochs']}")
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
@@ -395,6 +409,7 @@ def main():
             fraud_classifier = tf_estimator.Estimator(
                 model_fn=model, params=best["params"]
             )
+            final_noise = best["params"]["noise_multiplier"]
             for epoch in range(1, best["epochs"] + 1):
                 fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
                 eval_results = fraud_classifier.evaluate(
@@ -406,6 +421,16 @@ def main():
                 )
                 mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
+                
+                # Early stopping también en entrenamiento final si epsilon > 5
+                if final_noise > 0:
+                    epsilon = compute_epsP(
+                        epoch, final_noise, X_train.shape[0], batch_size, 1e-6
+                    )
+                    mlflow.log_metric("epsilon", epsilon, step=epoch)
+                    if epsilon > 5.0:
+                        print(f"\n>> Early stopping in final training: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}")
+                        break
 
             # Reporte final y CM
             final_threshold = best["params"]["pred_threshold"]
