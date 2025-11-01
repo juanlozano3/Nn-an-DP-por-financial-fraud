@@ -116,10 +116,10 @@ def model(features, labels, mode, params):
         stddev=stddev
     )
     
+    # Note: When using dp_sum_query, l2_norm_clip and noise_multiplier are already included
+    # in the query, so they should not be passed separately to the optimizer
     optimizer = dp_optimizer.DPGradientDescentOptimizer(
         dp_sum_query,
-        l2_norm_clip=params["l2_norm_clip"],
-        noise_multiplier=params["noise_multiplier"],
         num_microbatches=params["num_microbatches"],
         learning_rate=params["learning_rate"],
         unroll_microbatches=params["unroll_microbatches"],
