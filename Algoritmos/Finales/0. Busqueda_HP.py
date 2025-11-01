@@ -82,42 +82,57 @@ print("Después del balanceo:", dict(zip(unique_post, counts_post)))
 
 
 # =========================
+# Parámetros FIJOS (no se buscan)
+# =========================
+# Esta búsqueda SOLO optimiza las unidades por capa (units1, units2)
+# Todos los demás parámetros son fijos. Puedes modificarlos aquí y luego
+# hacer búsquedas separadas con diferentes optimizadores/LR/etc.
+OPTIMIZER = "adam"  # Opciones: "adam", "sgd"
+LEARNING_RATE = 0.001  # Ajustar según necesites
+DROPOUT1 = 0.3  # Dropout después de la primera capa
+DROPOUT2 = 0.2  # Dropout después de la segunda capa
+L2_REG = 1e-4  # Regularización L2 en todas las capas
+
+
+# =========================
 # Hiperparámetros y modelo
+# Solo busca: unidades por capa
 # =========================
 def model_builder(hp: kt.HyperParameters):
     model = keras.Sequential()
-    hp_units1 = hp.Int("units1", min_value=64, max_value=512, step=64)
-    hp_units2 = hp.Int("units2", min_value=32, max_value=256, step=32)
-    hp_drop1 = hp.Float("dropout1", 0.0, 0.5, step=0.1)
-    hp_drop2 = hp.Float("dropout2", 0.0, 0.5, step=0.1)
-    hp_l2 = hp.Choice("l2", values=[0.0, 1e-5, 1e-4, 1e-3])
-    hp_opt = hp.Choice("optimizer", values=["adam", "sgd"])
+    # SOLO buscar unidades de las capas
+    hp_units1 = hp.Int("units1", min_value=32, max_value=512, step=32)
+    hp_units2 = hp.Int("units2", min_value=16, max_value=256, step=16)
+    # Opcional: también buscar dropout si quieres, pero por ahora fijo
+    # hp_drop1 = hp.Float("dropout1", 0.0, 0.5, step=0.1)
+    # hp_drop2 = hp.Float("dropout2", 0.0, 0.5, step=0.1)
 
     model.add(keras.layers.Input(shape=(X_train.shape[1],)))
     model.add(
         keras.layers.Dense(
             units=hp_units1,
             activation="relu",
-            kernel_regularizer=keras.regularizers.l2(hp_l2),
+            kernel_regularizer=keras.regularizers.l2(L2_REG),
         )
     )
-    model.add(keras.layers.Dropout(hp_drop1))
+    model.add(keras.layers.Dropout(DROPOUT1))
     model.add(
         keras.layers.Dense(
             units=hp_units2,
             activation="relu",
-            kernel_regularizer=keras.regularizers.l2(hp_l2),
+            kernel_regularizer=keras.regularizers.l2(L2_REG),
         )
     )
-    model.add(keras.layers.Dropout(hp_drop2))
+    model.add(keras.layers.Dropout(DROPOUT2))
     model.add(keras.layers.Dense(1, activation="sigmoid"))
 
-    if hp_opt == "adam":
-        hp_lr = hp.Choice("learning_rate", values=[1e-3, 5e-3, 1e-2])
-        optimizer = keras.optimizers.Adam(learning_rate=hp_lr)
+    # Optimizador y LR fijos
+    if OPTIMIZER.lower() == "adam":
+        optimizer = keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+    elif OPTIMIZER.lower() == "sgd":
+        optimizer = keras.optimizers.SGD(learning_rate=LEARNING_RATE, momentum=0.9)
     else:
-        hp_lr = hp.Choice("learning_rate", values=[1e-2, 5e-2, 1e-1, 2.5e-1])
-        optimizer = keras.optimizers.SGD(learning_rate=hp_lr, momentum=0.9)
+        optimizer = keras.optimizers.Adam(learning_rate=LEARNING_RATE)
 
     model.compile(
         optimizer=optimizer,
@@ -134,51 +149,70 @@ def model_builder(hp: kt.HyperParameters):
 
 
 # Tuner optimizando AUPRC (mejor para clase positiva rara)
+# Hyperband es eficiente, pero aumenta max_epochs para mejor exploración
 tuner = kt.Hyperband(
     model_builder,
     objective=kt.Objective("val_auprc", direction="max"),
-    max_epochs=20,
+    max_epochs=30,  # Aumentado para mejor convergencia
     factor=3,
     directory="my_dir",
     project_name="tuning_tabular_model",
     overwrite=True,
+    executions_per_trial=1,  # Reducir tiempo, pero podrías aumentar para más robustez
 )
 
 stop_early = tf.keras.callbacks.EarlyStopping(
-    monitor="val_auprc", patience=5, mode="max", restore_best_weights=True
+    monitor="val_auprc",
+    patience=7,
+    mode="max",
+    restore_best_weights=True,  # Más paciencia
 )
 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-    monitor="val_auprc", factor=0.5, patience=2, mode="max", min_lr=1e-5, verbose=1
+    monitor="val_auprc",
+    factor=0.5,
+    patience=3,
+    mode="max",
+    min_lr=1e-6,
+    verbose=1,  # Más paciencia, LR mínimo más bajo
 )
+
+# Considera agregar batch_size como hiperparámetro, pero por ahora fijo
+# Para DP-SGD, batch_size típicamente necesita ser mayor (256-512)
+BATCH_SIZE = 256
 
 tuner.search(
     X_train,
     y_train,
     epochs=50,
+    batch_size=BATCH_SIZE,  # Explícito
     validation_split=0.2,
     callbacks=[stop_early, reduce_lr],
     verbose=1,
 )
 
 best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
-print(
-    f"\nHPO finalizado.\n"
-    f"Mejor units1: {best_hps.get('units1')}\n"
-    f"Mejor units2: {best_hps.get('units2')}\n"
-    f"Mejor dropout1/2: {best_hps.get('dropout1')} / {best_hps.get('dropout2')}\n"
-    f"Mejor l2: {best_hps.get('l2')} | Optimizer: {best_hps.get('optimizer')}\n"
-    f"Mejor learning_rate: {best_hps.get('learning_rate')}\n"
-)
+print("\n" + "=" * 50)
+print("  BÚSQUEDA DE ARQUITECTURA FINALIZADA")
+print("=" * 50)
+print(f"Mejor units1 (capa 1):  {best_hps.get('units1')}")
+print(f"Mejor units2 (capa 2):  {best_hps.get('units2')}")
+print(f"\nParámetros fijos usados:")
+print(f"  Optimizer:            {OPTIMIZER}")
+print(f"  Learning rate:        {LEARNING_RATE}")
+print(f"  Dropout capa 1/2:     {DROPOUT1} / {DROPOUT2}")
+print(f"  L2 regularization:   {L2_REG}")
+print("=" * 50)
 
 # === Construye el modelo con los mejores HPs ===
 model = tuner.hypermodel.build(best_hps)
 
 # Entrenamiento final con los mejores HPs
+# Usa el mismo batch_size que en la búsqueda
 history = model.fit(
     X_train,
     y_train,
-    epochs=50,
-    batch_size=256,
+    epochs=100,  # Más épocas para entrenamiento final
+    batch_size=BATCH_SIZE,
     validation_split=0.2,
     callbacks=[stop_early, reduce_lr],
     verbose=1,
@@ -229,21 +263,24 @@ best_thr, best_prec, best_rec, best_f1 = find_best_threshold(
 y_pred_best = (y_pred_prob >= best_thr).astype(int)
 cm_best = confusion_matrix(y_test, y_pred_best)
 
-# 3) Paquete final de parámetros
-print("\n============================")
-print("     PARÁMETROS A USAR      ")
-print("============================")
-print(f"Mejor units1:        {best_hps.get('units1')}")
-print(f"Mejor units2:        {best_hps.get('units2')}")
-print(f"Mejor dropout1/2:    {best_hps.get('dropout1')} / {best_hps.get('dropout2')}")
-print(f"Mejor l2:            {best_hps.get('l2')}")
-print(f"Optimizer:           {best_hps.get('optimizer')}")
-print(f"Mejor learning_rate: {best_hps.get('learning_rate')}")
-print(f"Scaler:              StandardScaler(with_mean=True, with_std=True)")
-print(f"Balanceo:            Downsampling mayoritaria en train")
-print(f"Umbral recomendado (F1 clase 1): {best_thr:.3f}")
+# 3) Paquete final de parámetros - ARQUITECTURA
+print("\n" + "=" * 50)
+print("     ARQUITECTURA ENCONTRADA (SOLO CAPAS)")
+print("=" * 50)
+print(f"Units capa 1:          {best_hps.get('units1')}")
+print(f"Units capa 2:          {best_hps.get('units2')}")
+print(f"\nParámetros fijos usados en la búsqueda:")
+print(f"  Optimizer:           {OPTIMIZER}")
+print(f"  Learning rate:       {LEARNING_RATE}")
+print(f"  Dropout capa 1/2:    {DROPOUT1} / {DROPOUT2}")
+print(f"  L2 regularization:  {L2_REG}")
+print(f"  Scaler:              StandardScaler(with_mean=True, with_std=True)")
+print(f"  Balanceo:            Downsampling mayoritaria en train")
+print(f"  Batch size:          {BATCH_SIZE}")
+print(f"\nEvaluación en test (con arquitectura encontrada):")
+print(f"  Umbral recomendado (F1 clase 1): {best_thr:.3f}")
 print(
-    f"-> Precisión(1): {best_prec:.4f} | Recall(1): {best_rec:.4f} | F1(1): {best_f1:.4f}"
+    f"  -> Precisión(1): {best_prec:.4f} | Recall(1): {best_rec:.4f} | F1(1): {best_f1:.4f}"
 )
-print("Matriz de confusión con umbral recomendado:")
+print("\nMatriz de confusión con umbral recomendado:")
 print(cm_best)
