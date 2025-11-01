@@ -38,8 +38,10 @@ def define_model(features):
     model = tf.keras.Sequential(
         [
             tf.keras.layers.InputLayer(input_shape=(n_features,)),
-            tf.keras.layers.Dense(224, activation="relu", name="dense_1"),
+            tf.keras.layers.Dense(288, activation="relu", name="dense_1"),
+            tf.keras.layers.Dropout(0.3, name="dropout_1"),
             tf.keras.layers.Dense(64, activation="relu", name="dense_2"),
+            tf.keras.layers.Dropout(0.2, name="dropout_2"),
             tf.keras.layers.Dense(1, activation="sigmoid", name="out"),
         ]
     )
@@ -226,16 +228,16 @@ def main():
     total_epochs = 5
     steps_per_epoch = X_train.shape[0] // batch_size
     # ============================================
-    # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, epochs
+    # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
     # ============================================
-    CLIP_GRID = [0.8, 1.0]
-    NOISE_GRID = [0.8, 1.1]
-    LR_GRID = [0.15, 0.25]
+    CLIP_GRID = [0.5, 0.8, 1.0, 1.2, 1.5]
+    NOISE_GRID = [0.5, 0.8, 1.0, 1.1, 1.5]
+    LR_GRID = [0.01, 0.05, 0.1, 0.15, 0.25, 0.3]
+    THRESHOLD_GRID = [0.1, 0.2, 0.3, 0.4, 0.5]
     EPOCHS_GRID = [5]
-    grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, EPOCHS_GRID))
+    grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
     total_trials = len(grid_combos)
-    # Para predicciones -> umbral (puedes traerlo de params si quieres)
-    prob_threshold = 0.2
+    print(f"Total number of hyperparameter combinations: {total_trials}")
 
     best = {"score": -float("inf"), "params": None, "epochs": None}
 
@@ -244,7 +246,6 @@ def main():
         mlflow.log_param("n_train", int(X_train.shape[0]))
         mlflow.log_param("n_test", int(X_test.shape[0]))
         mlflow.log_param("batch_size", 256)  # lo usas abajo
-        mlflow.log_param("pred_threshold", prob_threshold)
 
         # Prepara input fns (reutilizables)
         batch_size = 256
@@ -264,7 +265,7 @@ def main():
         eval_input = make_eval_input()
         eval_steps = max(1, X_test.shape[0] // batch_size)
 
-    for clip, noise, lr, total_epochs in tqdm(
+    for clip, noise, lr, threshold, total_epochs in tqdm(
         grid_combos, desc="HPO trials", unit="trial"
     ):
         trial_params = {
@@ -273,15 +274,16 @@ def main():
             "num_microbatches": 32,
             "learning_rate": lr,
             "unroll_microbatches": False,
-            "pred_threshold": prob_threshold,
+            "pred_threshold": threshold,
         }
 
-        run_name = f"clip={clip}_noise={noise}_lr={lr}_ep={total_epochs}"
+        run_name = f"clip={clip}_noise={noise}_lr={lr}_thr={threshold}_ep={total_epochs}"
         with mlflow.start_run(run_name=run_name, nested=True):
             # Log params del trial
             mlflow.log_param("l2_norm_clip", clip)
             mlflow.log_param("noise_multiplier", noise)
             mlflow.log_param("learning_rate", lr)
+            mlflow.log_param("threshold", threshold)
             mlflow.log_param("num_microbatches", 32)
             mlflow.log_param("epochs", total_epochs)
 
@@ -324,7 +326,7 @@ def main():
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
                 preds = list(fraud_classifier.predict(input_fn=eval_input))
-                y_pred = [1 if p["prob"][0] > prob_threshold else 0 for p in preds]
+                y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
                 report = classification_report(
                     y_test[: len(y_pred)], y_pred, output_dict=True
                 )
@@ -353,7 +355,7 @@ def main():
                 cm_df = pd.DataFrame(
                     cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
                 )
-                cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_ep{total_epochs}_epoch{epoch}.csv"
+                cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_epoch{epoch}.csv"
                 cm_df.to_csv(cm_csv_path)
                 mlflow.log_artifact(cm_csv_path)
                 os.remove(cm_csv_path)
@@ -399,8 +401,9 @@ def main():
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
             # Reporte final y CM
+            final_threshold = best["params"]["pred_threshold"]
             preds = list(fraud_classifier.predict(input_fn=eval_input))
-            y_pred = [1 if p["prob"][0] > prob_threshold else 0 for p in preds]
+            y_pred = [1 if p["prob"][0] > final_threshold else 0 for p in preds]
             report_text = classification_report(y_test[: len(y_pred)], y_pred, digits=4)
             print("\nClassification Report (FINAL):\n", report_text)
             mlflow.log_text(report_text, "final_classification_report.txt")
