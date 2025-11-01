@@ -5,6 +5,13 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+# Suprimir warnings de TensorFlow y otras librerías
+import warnings
+import logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
+warnings.filterwarnings('ignore')
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
 
@@ -26,6 +33,9 @@ import mlflow.tensorflow
 import sys, os
 from itertools import product
 from tqdm.auto import tqdm  # auto: usa barra bonita en Colab/Jupyter o terminal
+
+# Configurar tqdm para que sea menos verboso
+tqdm.pandas = lambda *args, **kwargs: None
 
 
 GDP_REPO = "../../Deep-Learning-with-GDP-Tensorflow"
@@ -224,13 +234,14 @@ def main():
     y_train = y_train_balanced.to_numpy().astype(np.int32)[shuf_idx]
 
     # Shapes & balance after resampling
-    print("X train: ", len(X_train))
-    print("X Test: ", len(X_test))
-    print("y Train: ", len(y_train))
-    print("y Test: ", len(y_test))
+    print("\nPreparación de datos completada:")
+    print(f"  • X train: {len(X_train)}")
+    print(f"  • X Test:  {len(X_test)}")
+    print(f"  • y Train: {len(y_train)}")
+    print(f"  • y Test:  {len(y_test)}")
     # Después del balanceo
     unique_post, counts_post = np.unique(y_train, return_counts=True)
-    print("Después del balanceo:", dict(zip(unique_post, counts_post)))
+    print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}\n")
 
     # Training params
     batch_size = 256
@@ -276,9 +287,12 @@ def main():
         eval_steps = max(1, X_test.shape[0] // batch_size)
 
     trial_num = 0
-    for clip, noise, lr, threshold, total_epochs in tqdm(
-        grid_combos, desc="HPO trials", unit="trial"
-    ):
+    print("\n" + "="*80)
+    print("INICIANDO BÚSQUEDA DE HIPERPARÁMETROS")
+    print(f"Total de combinaciones a probar: {total_trials}")
+    print("="*80 + "\n")
+    
+    for clip, noise, lr, threshold, total_epochs in grid_combos:
         trial_num += 1
         trial_params = {
             "l2_norm_clip": clip,
@@ -303,14 +317,8 @@ def main():
                 model_fn=model, params=trial_params
             )
 
-            # === barra por épocas del trial ===
-            epoch_bar = tqdm(
-                range(1, total_epochs + 1),
-                desc=f"epochs ({run_name})",
-                unit="ep",
-                leave=False,
-            )
-            for epoch in epoch_bar:
+            # === entrenamiento por épocas ===
+            for epoch in range(1, total_epochs + 1):
                 t0 = time.time()
                 fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
                 dur = time.time() - t0
@@ -318,15 +326,6 @@ def main():
                 # Eval
                 eval_results = fraud_classifier.evaluate(
                     input_fn=eval_input, steps=eval_steps
-                )
-
-                # (opcional) muestra métrica en la barra de épocas
-                epoch_bar.set_postfix(
-                    {
-                        "auprc": f"{float(eval_results['auprc']):.3f}",
-                        "auroc": f"{float(eval_results['auroc']):.3f}",
-                        "acc": f"{float(eval_results['accuracy']):.3f}",
-                    }
                 )
 
                 # MLflow logs (igual que ya tienes)
@@ -380,7 +379,6 @@ def main():
                     
                     # Early stopping si epsilon > 5
                     if epsilon > 5.0:
-                        print(f"\n>> Early stopping: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}")
                         mlflow.log_param("early_stopped", True)
                         mlflow.log_param("early_stop_epoch", epoch)
                         mlflow.log_param("early_stop_reason", "epsilon > 5.0")
@@ -409,29 +407,29 @@ def main():
                 best["val_loss"] = float(eval_results["loss"])
             
             # Imprimir resultados del trial de forma clara y detallada
-            print("\n" + "="*80)
-            print(f"TRIAL {trial_num}/{total_trials} COMPLETADO")
-            print("="*80)
-            print(f"Hiperparámetros:")
-            print(f"  • L2 Norm Clip:     {clip}")
-            print(f"  • Noise Multiplier:  {noise}")
-            print(f"  • Learning Rate:     {lr}")
-            print(f"  • Threshold:         {threshold}")
-            print(f"  • Epochs:            {epoch}/{total_epochs}")
-            print(f"\nMétricas Finales del Trial:")
-            print(f"  • Val Loss:          {final_loss:.4f}")
-            print(f"  • AUPRC:             {final_auprc:.4f}")
-            print(f"  • AUROC:             {final_auroc:.4f}")
-            print(f"  • Accuracy:          {final_acc:.4f}")
+            print("\n" + "="*80, flush=True)
+            print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
+            print("="*80, flush=True)
+            print(f"Hiperparámetros:", flush=True)
+            print(f"  • L2 Norm Clip:     {clip}", flush=True)
+            print(f"  • Noise Multiplier:  {noise}", flush=True)
+            print(f"  • Learning Rate:     {lr}", flush=True)
+            print(f"  • Threshold:         {threshold}", flush=True)
+            print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
+            print(f"\nMétricas Finales del Trial:", flush=True)
+            print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
+            print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
+            print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
+            print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
             if noise > 0:
-                print(f"  • Epsilon (ε):       {final_epsilon:.4f}")
-            print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}")
+                print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
+            print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}", flush=True)
             if is_best:
-                print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)")
+                print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)", flush=True)
             else:
-                print(f"  Val Loss actual:      {final_loss:.4f}")
-                print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}")
-            print("="*80)
+                print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
+                print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
+            print("="*80 + "\n", flush=True)
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
