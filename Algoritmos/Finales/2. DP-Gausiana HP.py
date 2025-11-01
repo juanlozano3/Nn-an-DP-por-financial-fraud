@@ -257,6 +257,8 @@ def main():
     grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
     total_trials = len(grid_combos)
     print(f"Total number of hyperparameter combinations: {total_trials}")
+    print(f"Grid sizes: Clip={len(CLIP_GRID)}, Noise={len(NOISE_GRID)}, LR={len(LR_GRID)}, "
+          f"Threshold={len(THRESHOLD_GRID)}, Epochs={len(EPOCHS_GRID)}")
 
     best = {"score": -float("inf"), "params": None, "epochs": None, "val_loss": float("inf")}
 
@@ -292,8 +294,23 @@ def main():
     print(f"Total de combinaciones a probar: {total_trials}")
     print("="*80 + "\n")
     
-    for clip, noise, lr, threshold, total_epochs in grid_combos:
+    # Crear barra de progreso con información detallada
+    pbar = tqdm(
+        grid_combos,
+        desc="HPO Progress",
+        total=total_trials,
+        unit="trial",
+        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+        ncols=100
+    )
+    
+    for clip, noise, lr, threshold, total_epochs in pbar:
         trial_num += 1
+        
+        # Actualizar descripción de la barra con información del trial actual
+        pbar.set_description(
+            f"Trial {trial_num}/{total_trials} | clip={clip} noise={noise} lr={lr} thr={threshold} ep={total_epochs}"
+        )
         trial_params = {
             "l2_norm_clip": clip,
             "noise_multiplier": noise,
@@ -406,30 +423,38 @@ def main():
                 best["epochs"] = epoch  # Usar epoch actual en caso de early stopping
                 best["val_loss"] = float(eval_results["loss"])
             
-            # Imprimir resultados del trial de forma clara y detallada
-            print("\n" + "="*80, flush=True)
-            print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
-            print("="*80, flush=True)
-            print(f"Hiperparámetros:", flush=True)
-            print(f"  • L2 Norm Clip:     {clip}", flush=True)
-            print(f"  • Noise Multiplier:  {noise}", flush=True)
-            print(f"  • Learning Rate:     {lr}", flush=True)
-            print(f"  • Threshold:         {threshold}", flush=True)
-            print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
-            print(f"\nMétricas Finales del Trial:", flush=True)
-            print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
-            print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
-            print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
-            print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
-            if noise > 0:
-                print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
-            print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}", flush=True)
+            # Actualizar la barra de progreso con información del trial
+            status_msg = f"Loss={final_loss:.4f} | AUPRC={final_auprc:.4f}"
             if is_best:
-                print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)", flush=True)
-            else:
-                print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
-                print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
-            print("="*80 + "\n", flush=True)
+                status_msg += " ⭐ BEST"
+            pbar.set_postfix_str(status_msg)
+            
+            # Imprimir resultados del trial de forma clara y detallada (resumen)
+            # Solo imprimir cada N trials o cuando hay un nuevo mejor modelo para no saturar
+            if is_best or trial_num == 1 or trial_num % 10 == 0 or trial_num == total_trials:
+                print("\n" + "="*80, flush=True)
+                print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
+                print("="*80, flush=True)
+                print(f"Hiperparámetros:", flush=True)
+                print(f"  • L2 Norm Clip:     {clip}", flush=True)
+                print(f"  • Noise Multiplier:  {noise}", flush=True)
+                print(f"  • Learning Rate:     {lr}", flush=True)
+                print(f"  • Threshold:         {threshold}", flush=True)
+                print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
+                print(f"\nMétricas Finales del Trial:", flush=True)
+                print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
+                print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
+                print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
+                print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
+                if noise > 0:
+                    print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
+                print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}", flush=True)
+                if is_best:
+                    print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)", flush=True)
+                else:
+                    print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
+                    print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
+                print("="*80 + "\n", flush=True)
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
