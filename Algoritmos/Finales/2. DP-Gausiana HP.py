@@ -5,6 +5,13 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+# Suprimir warnings de TensorFlow y otras librerías
+import warnings
+import logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
+warnings.filterwarnings('ignore')
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
 
@@ -26,6 +33,9 @@ import mlflow.tensorflow
 import sys, os
 from itertools import product
 from tqdm.auto import tqdm  # auto: usa barra bonita en Colab/Jupyter o terminal
+
+# Configurar tqdm para que sea menos verboso
+tqdm.pandas = lambda *args, **kwargs: None
 
 
 GDP_REPO = "../../Deep-Learning-with-GDP-Tensorflow"
@@ -224,13 +234,14 @@ def main():
     y_train = y_train_balanced.to_numpy().astype(np.int32)[shuf_idx]
 
     # Shapes & balance after resampling
-    print("X train: ", len(X_train))
-    print("X Test: ", len(X_test))
-    print("y Train: ", len(y_train))
-    print("y Test: ", len(y_test))
+    print("\nPreparación de datos completada:")
+    print(f"  • X train: {len(X_train)}")
+    print(f"  • X Test:  {len(X_test)}")
+    print(f"  • y Train: {len(y_train)}")
+    print(f"  • y Test:  {len(y_test)}")
     # Después del balanceo
     unique_post, counts_post = np.unique(y_train, return_counts=True)
-    print("Después del balanceo:", dict(zip(unique_post, counts_post)))
+    print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}\n")
 
     # Training params
     batch_size = 256
@@ -238,14 +249,16 @@ def main():
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
     # ============================================
-    CLIP_GRID = [0.5, 0.8, 1.0, 1.2, 1.5]
-    NOISE_GRID = [0.5, 0.8, 1.0, 1.1, 1.5]
-    LR_GRID = [0.01, 0.05, 0.1, 0.15, 0.25, 0.3]
-    THRESHOLD_GRID = [0.1, 0.2, 0.3, 0.4, 0.5]
-    EPOCHS_GRID = [10, 15, 20, 25, 30]  # Rango de épocas entre 10 y 30
+    CLIP_GRID = [0.5, 1.0, 1.5]
+    NOISE_GRID = [ 0.8, 1.0, 1.1]
+    LR_GRID = [0.01, 0.1, 0.25]
+    THRESHOLD_GRID = [0.2]
+    EPOCHS_GRID = [15, 25, 30]  # Rango de épocas entre 10 y 30
     grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
     total_trials = len(grid_combos)
     print(f"Total number of hyperparameter combinations: {total_trials}")
+    print(f"Grid sizes: Clip={len(CLIP_GRID)}, Noise={len(NOISE_GRID)}, LR={len(LR_GRID)}, "
+          f"Threshold={len(THRESHOLD_GRID)}, Epochs={len(EPOCHS_GRID)}")
 
     best = {"score": -float("inf"), "params": None, "epochs": None, "val_loss": float("inf")}
 
@@ -275,9 +288,29 @@ def main():
         eval_input = make_eval_input()
         eval_steps = max(1, X_test.shape[0] // batch_size)
 
-    for clip, noise, lr, threshold, total_epochs in tqdm(
-        grid_combos, desc="HPO trials", unit="trial"
-    ):
+    trial_num = 0
+    print("\n" + "="*80)
+    print("INICIANDO BÚSQUEDA DE HIPERPARÁMETROS")
+    print(f"Total de combinaciones a probar: {total_trials}")
+    print("="*80 + "\n")
+    
+    # Crear barra de progreso con información detallada
+    pbar = tqdm(
+        grid_combos,
+        desc="HPO Progress",
+        total=total_trials,
+        unit="trial",
+        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+        ncols=100
+    )
+    
+    for clip, noise, lr, threshold, total_epochs in pbar:
+        trial_num += 1
+        
+        # Actualizar descripción de la barra con información del trial actual
+        pbar.set_description(
+            f"Trial {trial_num}/{total_trials} | clip={clip} noise={noise} lr={lr} thr={threshold} ep={total_epochs}"
+        )
         trial_params = {
             "l2_norm_clip": clip,
             "noise_multiplier": noise,
@@ -301,14 +334,8 @@ def main():
                 model_fn=model, params=trial_params
             )
 
-            # === barra por épocas del trial ===
-            epoch_bar = tqdm(
-                range(1, total_epochs + 1),
-                desc=f"epochs ({run_name})",
-                unit="ep",
-                leave=False,
-            )
-            for epoch in epoch_bar:
+            # === entrenamiento por épocas ===
+            for epoch in range(1, total_epochs + 1):
                 t0 = time.time()
                 fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
                 dur = time.time() - t0
@@ -318,16 +345,7 @@ def main():
                     input_fn=eval_input, steps=eval_steps
                 )
 
-                # (opcional) muestra métrica en la barra de épocas
-                epoch_bar.set_postfix(
-                    {
-                        "auprc": f"{float(eval_results['auprc']):.3f}",
-                        "auroc": f"{float(eval_results['auroc']):.3f}",
-                        "acc": f"{float(eval_results['accuracy']):.3f}",
-                    }
-                )
-
-                # MLflow logs (igual que ya tienes)
+                # MLflow logs - solo métricas básicas cada epoch (optimización 3)
                 mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
                 mlflow.log_metric(
                     "accuracy", float(eval_results["accuracy"]), step=epoch
@@ -335,40 +353,35 @@ def main():
                 mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
-                preds = list(fraud_classifier.predict(input_fn=eval_input))
-                y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
-                report = classification_report(
-                    y_test[: len(y_pred)], y_pred, output_dict=True
-                )
+                # Métricas detalladas solo cada 5 épocas o en la última (optimización 3)
+                log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
+                
+                if log_detailed:
+                    preds = list(fraud_classifier.predict(input_fn=eval_input))
+                    y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+                    report = classification_report(
+                        y_test[: len(y_pred)], y_pred, output_dict=True
+                    )
 
-                mlflow.log_metric(
-                    "precision_class_0", report["0"]["precision"], step=epoch
-                )
-                mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
-                mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
-                mlflow.log_metric(
-                    "precision_class_1", report["1"]["precision"], step=epoch
-                )
-                mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
-                mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
-                mlflow.log_metric(
-                    "precision_macro", report["macro avg"]["precision"], step=epoch
-                )
-                mlflow.log_metric(
-                    "recall_macro", report["macro avg"]["recall"], step=epoch
-                )
-                mlflow.log_metric(
-                    "f1_macro", report["macro avg"]["f1-score"], step=epoch
-                )
-
-                cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
-                cm_df = pd.DataFrame(
-                    cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-                )
-                cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_epoch{epoch}.csv"
-                cm_df.to_csv(cm_csv_path)
-                mlflow.log_artifact(cm_csv_path)
-                os.remove(cm_csv_path)
+                    mlflow.log_metric(
+                        "precision_class_0", report["0"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
+                    mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
+                    mlflow.log_metric(
+                        "precision_class_1", report["1"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
+                    mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
+                    mlflow.log_metric(
+                        "precision_macro", report["macro avg"]["precision"], step=epoch
+                    )
+                    mlflow.log_metric(
+                        "recall_macro", report["macro avg"]["recall"], step=epoch
+                    )
+                    mlflow.log_metric(
+                        "f1_macro", report["macro avg"]["f1-score"], step=epoch
+                    )
 
                 if noise > 0:
                     epsilon = compute_epsP(
@@ -378,26 +391,103 @@ def main():
                     
                     # Early stopping si epsilon > 5
                     if epsilon > 5.0:
-                        print(f"\n>> Early stopping: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}")
                         mlflow.log_param("early_stopped", True)
                         mlflow.log_param("early_stop_epoch", epoch)
                         mlflow.log_param("early_stop_reason", "epsilon > 5.0")
                         break
                 else:
                     epsilon = 0.0
+            
+            # Optimización 1 y 2: Predict, classification_report y confusion matrix solo al final del trial
+            preds = list(fraud_classifier.predict(input_fn=eval_input))
+            y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+            report = classification_report(
+                y_test[: len(y_pred)], y_pred, output_dict=True
+            )
+            
+            # Log métricas finales detalladas
+            mlflow.log_metric(
+                "precision_class_0_final", report["0"]["precision"]
+            )
+            mlflow.log_metric("recall_class_0_final", report["0"]["recall"])
+            mlflow.log_metric("f1_class_0_final", report["0"]["f1-score"])
+            mlflow.log_metric(
+                "precision_class_1_final", report["1"]["precision"]
+            )
+            mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
+            mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
+            mlflow.log_metric(
+                "precision_macro_final", report["macro avg"]["precision"]
+            )
+            mlflow.log_metric(
+                "recall_macro_final", report["macro avg"]["recall"]
+            )
+            mlflow.log_metric(
+                "f1_macro_final", report["macro avg"]["f1-score"]
+            )
+            
+            # Confusion matrix solo al final (optimización 2)
+            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+            cm_df = pd.DataFrame(
+                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+            )
+            cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_final.csv"
+            cm_df.to_csv(cm_csv_path)
+            mlflow.log_artifact(cm_csv_path)
+            os.remove(cm_csv_path)
 
             # criterio de selección del trial: usar val_loss (minimizar pérdida)
             trial_score = -float(eval_results["loss"])  # Negativo porque buscamos mínimo pérdida
             mlflow.log_metric("trial_score", -trial_score)  # Log como pérdida positiva
             mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
-
-            if trial_score > best["score"]:  # Mayor score = menor pérdida (porque es negativo)
+            
+            # Obtener métricas finales del trial
+            final_auprc = float(eval_results["auprc"])
+            final_auroc = float(eval_results["auroc"])
+            final_acc = float(eval_results["accuracy"])
+            final_loss = float(eval_results["loss"])
+            final_epsilon = epsilon if noise > 0 else 0.0
+            
+            # Determinar si es el mejor
+            is_best = trial_score > best["score"]
+            if is_best:  # Mayor score = menor pérdida (porque es negativo)
                 best["score"] = trial_score
                 best["params"] = trial_params
                 best["epochs"] = epoch  # Usar epoch actual en caso de early stopping
                 best["val_loss"] = float(eval_results["loss"])
-
-            print(f"\n>> Best (by val_loss): loss={best.get('val_loss', 'N/A'):.4f}, epoch={best['epochs']}")
+            
+            # Actualizar la barra de progreso con información del trial
+            status_msg = f"Loss={final_loss:.4f} | AUPRC={final_auprc:.4f}"
+            if is_best:
+                status_msg += " ⭐ BEST"
+            pbar.set_postfix_str(status_msg)
+            
+            # Imprimir resultados del trial de forma clara y detallada (resumen)
+            # Solo imprimir cada N trials o cuando hay un nuevo mejor modelo para no saturar
+            if is_best or trial_num == 1 or trial_num % 10 == 0 or trial_num == total_trials:
+                print("\n" + "="*80, flush=True)
+                print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
+                print("="*80, flush=True)
+                print(f"Hiperparámetros:", flush=True)
+                print(f"  • L2 Norm Clip:     {clip}", flush=True)
+                print(f"  • Noise Multiplier:  {noise}", flush=True)
+                print(f"  • Learning Rate:     {lr}", flush=True)
+                print(f"  • Threshold:         {threshold}", flush=True)
+                print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
+                print(f"\nMétricas Finales del Trial:", flush=True)
+                print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
+                print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
+                print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
+                print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
+                if noise > 0:
+                    print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
+                print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}", flush=True)
+                if is_best:
+                    print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)", flush=True)
+                else:
+                    print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
+                    print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
+                print("="*80 + "\n", flush=True)
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
