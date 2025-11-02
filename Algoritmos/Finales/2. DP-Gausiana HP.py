@@ -284,9 +284,9 @@ def main():
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
     # ============================================
-    CLIP_GRID = [0.5, 1.0, 1.5]
-    NOISE_GRID = [ 0.8, 1.0, 1.1]
-    LR_GRID = [0.01, 0.1, 0.25]
+    CLIP_GRID = [0.5, 1.5]
+    NOISE_GRID = [ 0.8, 1.1]
+    LR_GRID = [0.01, 0.1]
     THRESHOLD_GRID = [0.2]
     EPOCHS_GRID = [15, 25, 30]  # Rango de épocas entre 10 y 30
     grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
