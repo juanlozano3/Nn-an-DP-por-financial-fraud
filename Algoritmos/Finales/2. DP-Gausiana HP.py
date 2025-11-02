@@ -16,12 +16,37 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
 
-# Estrategia 1: Configurar threads de TensorFlow para aprovechar todos los cores
-import multiprocessing
-num_cores = multiprocessing.cpu_count()
-tf.config.threading.set_intra_op_parallelism_threads(num_cores)
-tf.config.threading.set_inter_op_parallelism_threads(num_cores)
-print(f"TensorFlow configurado para usar {num_cores} cores CPU")
+# Configuración de GPU para mejor rendimiento
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Permitir crecimiento de memoria GPU para evitar asignar toda la memoria al inicio
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        # Configurar uso de GPU visible (usar la primera GPU disponible)
+        if len(gpus) > 0:
+            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+            print(f"✓ GPU detectada y configurada: {gpus[0].name}")
+            print(f"  Memoria GPU configurada para crecimiento dinámico")
+    except RuntimeError as e:
+        # Si hay error en configuración de GPU, continúa con CPU
+        print(f"Advertencia: Error configurando GPU: {e}")
+        print("  Continuando con CPU...")
+        gpus = []
+else:
+    print("⚠ No se detectó GPU. Usando CPU.")
+
+# Estrategia 1: Configurar threads de TensorFlow para aprovechar todos los cores (si no hay GPU)
+if not gpus:
+    import multiprocessing
+    num_cores = multiprocessing.cpu_count()
+    tf.config.threading.set_intra_op_parallelism_threads(num_cores)
+    tf.config.threading.set_inter_op_parallelism_threads(num_cores)
+    print(f"TensorFlow configurado para usar {num_cores} cores CPU")
+else:
+    # Con GPU, usar menos threads para no competir con la GPU
+    tf.config.threading.set_intra_op_parallelism_threads(2)
+    tf.config.threading.set_inter_op_parallelism_threads(2)
 
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy
 from tensorflow_privacy.privacy.optimizers import dp_optimizer
