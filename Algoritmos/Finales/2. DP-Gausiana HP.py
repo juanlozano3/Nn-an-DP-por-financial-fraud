@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import gc  # Para liberación explícita de memoria
 
 # Suprimir warnings de TensorFlow y otras librerías
 import warnings
@@ -14,6 +15,13 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
+
+# Estrategia 1: Configurar threads de TensorFlow para aprovechar todos los cores
+import multiprocessing
+num_cores = multiprocessing.cpu_count()
+tf.config.threading.set_intra_op_parallelism_threads(num_cores)
+tf.config.threading.set_inter_op_parallelism_threads(num_cores)
+print(f"TensorFlow configurado para usar {num_cores} cores CPU")
 
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy
 from tensorflow_privacy.privacy.optimizers import dp_optimizer
@@ -156,15 +164,17 @@ def model(features, labels, mode, params):
 def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
     """
     Create input function for the Estimator.
+    Optimizado con prefetch para mejor rendimiento.
     """
-
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=len(X))
+            dataset = dataset.shuffle(buffer_size=min(len(X), 10000))  # Buffer más pequeño para mejor rendimiento
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size)
+        # Estrategia 2: Optimizar tf.data pipeline con prefetch
+        dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)  # Prepara batches en paralelo
         return dataset
 
     return input_fn
@@ -334,6 +344,9 @@ def main():
                 model_fn=model, params=trial_params
             )
 
+            # Estrategia 4: Acumular métricas para batch logging
+            metrics_batch = []
+            
             # === entrenamiento por épocas ===
             for epoch in range(1, total_epochs + 1):
                 t0 = time.time()
@@ -345,13 +358,23 @@ def main():
                     input_fn=eval_input, steps=eval_steps
                 )
 
-                # MLflow logs - solo métricas básicas cada epoch (optimización 3)
-                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
-                mlflow.log_metric(
-                    "accuracy", float(eval_results["accuracy"]), step=epoch
-                )
-                mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
-                mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
+                # Estrategia 4: Acumular métricas básicas en lugar de loguear inmediatamente
+                metrics_batch.append({
+                    "eval_loss": float(eval_results["loss"]),
+                    "accuracy": float(eval_results["accuracy"]),
+                    "auroc": float(eval_results["auroc"]),
+                    "auprc": float(eval_results["auprc"]),
+                    "step": epoch
+                })
+                
+                # Loguear en batch cada 5 épocas o en la última
+                if epoch % 5 == 0 or epoch == total_epochs:
+                    for metric in metrics_batch:
+                        mlflow.log_metric("eval_loss", metric["eval_loss"], step=metric["step"])
+                        mlflow.log_metric("accuracy", metric["accuracy"], step=metric["step"])
+                        mlflow.log_metric("auroc", metric["auroc"], step=metric["step"])
+                        mlflow.log_metric("auprc", metric["auprc"], step=metric["step"])
+                    metrics_batch = []  # Limpiar batch después de loguear
 
                 # Métricas detalladas solo cada 5 épocas o en la última (optimización 3)
                 log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
@@ -488,6 +511,11 @@ def main():
                     print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
                     print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
                 print("="*80 + "\n", flush=True)
+            
+            # Estrategia 3: Liberar memoria explícitamente después de cada trial
+            tf.keras.backend.clear_session()  # Limpia la sesión de TensorFlow
+            del fraud_classifier  # Elimina el estimador
+            gc.collect()  # Fuerza garbage collection
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
