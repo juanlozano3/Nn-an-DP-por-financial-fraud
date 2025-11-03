@@ -5,6 +5,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import gc  # Para liberación explícita de memoria
+import tempfile  # Para directorios temporales
+import shutil  # Para limpieza de directorios
 
 # Suprimir warnings de TensorFlow y otras librerías
 import warnings
@@ -189,15 +191,17 @@ def model(features, labels, mode, params):
 def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
     """
     Create input function for the Estimator.
-    Optimizado con prefetch para mejor rendimiento.
+    Optimizado con prefetch y cache para mejor rendimiento.
     """
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=min(len(X), 10000))  # Buffer más pequeño para mejor rendimiento
+            # Buffer más eficiente: min entre dataset size y buffer razonable
+            buffer_size = min(len(X), 10000) if len(X) > 0 else 1000
+            dataset = dataset.shuffle(buffer_size=buffer_size, reshuffle_each_iteration=True)
         if repeat:
             dataset = dataset.repeat()
-        dataset = dataset.batch(batch_size)
+        dataset = dataset.batch(batch_size, drop_remainder=False)
         # Estrategia 2: Optimizar tf.data pipeline con prefetch
         dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)  # Prepara batches en paralelo
         return dataset
@@ -322,6 +326,12 @@ def main():
         train_input = make_train_input()
         eval_input = make_eval_input()
         eval_steps = max(1, X_test.shape[0] // batch_size)
+        
+        # Asegurar que los datos estén en float32 para mejor rendimiento GPU
+        if X_train.dtype != np.float32:
+            X_train = X_train.astype(np.float32)
+        if X_test.dtype != np.float32:
+            X_test = X_test.astype(np.float32)
 
     trial_num = 0
     print("\n" + "="*80)
@@ -356,6 +366,14 @@ def main():
         }
 
         run_name = f"clip={clip}_noise={noise}_lr={lr}_thr={threshold}_ep={total_epochs}"
+        
+        # Estrategia 3: Limpiar sesión ANTES de crear nuevo Estimator (evita acumulación)
+        tf.keras.backend.clear_session()
+        gc.collect()
+        
+        # Crear directorio temporal único para este trial (se limpiará después)
+        model_dir = tempfile.mkdtemp(prefix=f"tf_estimator_trial_{trial_num}_")
+        
         with mlflow.start_run(run_name=run_name, nested=True):
             # Log params del trial
             mlflow.log_param("l2_norm_clip", clip)
@@ -365,8 +383,18 @@ def main():
             mlflow.log_param("num_microbatches", 32)
             mlflow.log_param("epochs", total_epochs)
 
+            # Crear Estimator con directorio específico para este trial
             fraud_classifier = tf_estimator.Estimator(
-                model_fn=model, params=trial_params
+                model_fn=model, 
+                params=trial_params,
+                model_dir=model_dir,
+                config=tf_estimator.RunConfig(
+                    save_checkpoints_steps=None,  # No guardar checkpoints intermedios
+                    save_checkpoints_secs=None,
+                    save_summary_steps=None,
+                    log_step_count_steps=None,  # Reducir logging
+                    keep_checkpoint_max=1  # Mantener solo 1 checkpoint
+                )
             )
 
             # Estrategia 4: Acumular métricas para batch logging
@@ -537,10 +565,33 @@ def main():
                     print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
                 print("="*80 + "\n", flush=True)
             
-            # Estrategia 3: Liberar memoria explícitamente después de cada trial
-            tf.keras.backend.clear_session()  # Limpia la sesión de TensorFlow
-            del fraud_classifier  # Elimina el estimador
-            gc.collect()  # Fuerza garbage collection
+            # Estrategia 3: Limpieza completa después de cada trial
+            # 1. Cerrar y eliminar el Estimator
+            del fraud_classifier
+            
+            # 2. Limpiar directorio temporal del modelo
+            try:
+                if os.path.exists(model_dir):
+                    shutil.rmtree(model_dir, ignore_errors=True)
+            except Exception as e:
+                pass  # Ignorar errores de limpieza
+            
+            # 3. Limpiar sesión de TensorFlow
+            tf.keras.backend.clear_session()
+            
+            # 4. Limpiar variables locales (solo si existen)
+            try:
+                del preds, y_pred, report, cm, cm_df
+            except:
+                pass
+            try:
+                del metrics_batch
+            except:
+                pass
+            
+            # 5. Forzar garbage collection múltiples veces
+            gc.collect()
+            gc.collect()  # Segundo collect para asegurar limpieza completa
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
