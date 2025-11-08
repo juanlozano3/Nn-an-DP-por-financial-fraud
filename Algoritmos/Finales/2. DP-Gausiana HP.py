@@ -286,8 +286,25 @@ def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
         dataset = dataset.prefetch(AUTOTUNE)
         options = tf.data.Options()
         try:
-            options.experimental_threading.private_threadpool_size = DEFAULT_INTRA_THREADS
-            options.experimental_threading.max_intra_op_parallelism = DEFAULT_INTRA_THREADS
+            threading_opts = options.threading  # TensorFlow >= 2.14
+        except AttributeError:
+            threading_opts = getattr(options, "experimental_threading", None)
+        if threading_opts is not None:
+            try:
+                threading_opts.private_threadpool_size = DEFAULT_INTRA_THREADS
+            except AttributeError:
+                pass
+            try:
+                threading_opts.max_intra_op_parallelism = DEFAULT_INTRA_THREADS
+            except AttributeError:
+                pass
+        else:
+            warnings.warn(
+                "No se pudo ajustar tf.data.Options.threading; se usará configuración por defecto.",
+                RuntimeWarning,
+            )
+        try:
+            options.threading = threading_opts  # Reasignar si la API lo requiere
         except AttributeError:
             pass
         dataset = dataset.with_options(options)
