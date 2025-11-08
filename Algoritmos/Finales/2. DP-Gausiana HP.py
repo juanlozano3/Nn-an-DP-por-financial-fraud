@@ -65,6 +65,93 @@ AUTOTUNE = (
     tf.data.AUTOTUNE if hasattr(tf.data, "AUTOTUNE") else tf.data.experimental.AUTOTUNE
 )
 
+# -----------------------------------------------------------------------------
+# Utilidades de diagnóstico
+# -----------------------------------------------------------------------------
+def _maybe_import_psutil():
+    try:
+        import psutil  # type: ignore
+
+        return psutil
+    except Exception:
+        return None
+
+
+def hardware_summary():
+    """Devuelve información relevante de CPU/RAM para registro y diagnóstico."""
+
+    psutil = _maybe_import_psutil()
+    cpu_freq = None
+    cpu_percent = None
+    ram_total = None
+    ram_available = None
+
+    if psutil:
+        try:
+            cpu_freq = psutil.cpu_freq()
+        except Exception:
+            cpu_freq = None
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+        except Exception:
+            cpu_percent = None
+        try:
+            virtual_mem = psutil.virtual_memory()
+            ram_total = getattr(virtual_mem, "total", None)
+            ram_available = getattr(virtual_mem, "available", None)
+        except Exception:
+            ram_total = None
+            ram_available = None
+
+    return {
+        "logical_cpus": NUM_AVAILABLE_CPUS,
+        "tf_intra_threads": DEFAULT_INTRA_THREADS,
+        "tf_inter_threads": DEFAULT_INTER_THREADS,
+        "cpu_freq_current_mhz": cpu_freq.current if cpu_freq else None,
+        "cpu_freq_max_mhz": cpu_freq.max if cpu_freq else None,
+        "cpu_percent": cpu_percent,
+        "ram_total_bytes": ram_total,
+        "ram_available_bytes": ram_available,
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+        "tf_env_intra": os.environ.get("TF_NUM_INTRAOP_THREADS"),
+        "tf_env_inter": os.environ.get("TF_NUM_INTEROP_THREADS"),
+    }
+
+
+def print_hardware_summary(summary_dict):
+    """Imprime en consola la configuración de hardware utilizada."""
+
+    print("\n" + "=" * 80)
+    print("RESUMEN DE RECURSOS PARA LA BÚSQUEDA DE HIPERPARÁMETROS")
+    print("=" * 80)
+    print(f"  • CPUs lógicas detectadas: {summary_dict['logical_cpus']}")
+    print(
+        f"  • Threads TF intra-op / inter-op: "
+        f"{summary_dict['tf_intra_threads']} / {summary_dict['tf_inter_threads']}"
+    )
+    print(
+        f"  • TF_NUM_INTRAOP_THREADS / TF_NUM_INTEROP_THREADS: "
+        f"{summary_dict['tf_env_intra']} / {summary_dict['tf_env_inter']}"
+    )
+    print(f"  • OMP_NUM_THREADS: {summary_dict['omp_num_threads']}")
+
+    if summary_dict.get("cpu_freq_current_mhz") is not None:
+        print(
+            f"  • Frecuencia CPU actual/max (MHz): "
+            f"{summary_dict['cpu_freq_current_mhz']:.0f} / {summary_dict['cpu_freq_max_mhz']:.0f}"
+        )
+    if summary_dict.get("cpu_percent") is not None:
+        print(f"  • Uso CPU global al inicio: {summary_dict['cpu_percent']:.1f}%")
+    if summary_dict.get("ram_total_bytes") is not None:
+        gb = 1024 ** 3
+        print(
+            f"  • RAM total / disponible (GB): "
+            f"{summary_dict['ram_total_bytes'] / gb:.2f} / "
+            f"{summary_dict['ram_available_bytes'] / gb:.2f}"
+        )
+    print("=" * 80 + "\n")
+
+
 # Configurar tqdm para que sea menos verboso
 tqdm.pandas = lambda *args, **kwargs: None
 
@@ -197,6 +284,13 @@ def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
         dataset = dataset.batch(batch_size, drop_remainder=False)
         dataset = dataset.cache()
         dataset = dataset.prefetch(AUTOTUNE)
+        options = tf.data.Options()
+        try:
+            options.experimental_threading.private_threadpool_size = DEFAULT_INTRA_THREADS
+            options.experimental_threading.max_intra_op_parallelism = DEFAULT_INTRA_THREADS
+        except AttributeError:
+            pass
+        dataset = dataset.with_options(options)
         return dataset
 
     return input_fn
@@ -206,6 +300,9 @@ def main():
     """
     Main function to run DP-SGD training with tf.Estimator.
     """
+    resource_summary = hardware_summary()
+    print_hardware_summary(resource_summary)
+
     mlflow.set_experiment("DP-Fraud-Detection-Final")
 
     # Load and prepare dataset
@@ -315,6 +412,13 @@ def main():
         mlflow.log_param("cpu_available", DEFAULT_CPU_TARGET)
         mlflow.log_param("tf_inter_threads", DEFAULT_INTER_THREADS)
         mlflow.log_param("tf_intra_threads", DEFAULT_INTRA_THREADS)
+        for key, value in resource_summary.items():
+            if value is not None and key not in {
+                "logical_cpus",
+                "tf_intra_threads",
+                "tf_inter_threads",
+            }:
+                mlflow.log_param(f"resource_{key}", value)
 
         # Prepara input fns (reutilizables)
         batch_size = 256
@@ -368,6 +472,11 @@ def main():
         pbar.set_description(
             f"Trial {trial_num}/{total_trials} | clip={clip} noise={noise} lr={lr} thr={threshold} ep={total_epochs}"
         )
+        if trial_num == 1:
+            print(
+                f">> Ejecutando búsqueda con hilos TF intra/inter: "
+                f"{DEFAULT_INTRA_THREADS}/{DEFAULT_INTER_THREADS} y batch_size={batch_size}"
+            )
         trial_params = {
             "l2_norm_clip": clip,
             "noise_multiplier": noise,
