@@ -4,51 +4,17 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-import gc  # Para liberación explícita de memoria
-import tempfile  # Para directorios temporales
-import shutil  # Para limpieza de directorios
 
 # Suprimir warnings de TensorFlow y otras librerías
 import warnings
 import logging
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
-warnings.filterwarnings('ignore')
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+warnings.filterwarnings("ignore")
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
-
-# Configuración de GPU para mejor rendimiento
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        # Permitir crecimiento de memoria GPU para evitar asignar toda la memoria al inicio
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        # Configurar uso de GPU visible (usar la primera GPU disponible)
-        if len(gpus) > 0:
-            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-            print(f"✓ GPU detectada y configurada: {gpus[0].name}")
-            print(f"  Memoria GPU configurada para crecimiento dinámico")
-    except RuntimeError as e:
-        # Si hay error en configuración de GPU, continúa con CPU
-        print(f"Advertencia: Error configurando GPU: {e}")
-        print("  Continuando con CPU...")
-        gpus = []
-else:
-    print("⚠ No se detectó GPU. Usando CPU.")
-
-# Estrategia 1: Configurar threads de TensorFlow para aprovechar todos los cores (si no hay GPU)
-if not gpus:
-    import multiprocessing
-    num_cores = multiprocessing.cpu_count()
-    tf.config.threading.set_intra_op_parallelism_threads(num_cores)
-    tf.config.threading.set_inter_op_parallelism_threads(num_cores)
-    print(f"TensorFlow configurado para usar {num_cores} cores CPU")
-else:
-    # Con GPU, usar menos threads para no competir con la GPU
-    tf.config.threading.set_intra_op_parallelism_threads(2)
-    tf.config.threading.set_inter_op_parallelism_threads(2)
 
 from tensorflow_privacy.privacy.analysis import compute_dp_sgd_privacy
 from tensorflow_privacy.privacy.optimizers import dp_optimizer
@@ -68,6 +34,36 @@ import mlflow.tensorflow
 import sys, os
 from itertools import product
 from tqdm.auto import tqdm  # auto: usa barra bonita en Colab/Jupyter o terminal
+
+# -----------------------------------------------------------------------------
+# Configuración de recursos de hardware
+# -----------------------------------------------------------------------------
+NUM_AVAILABLE_CPUS = os.cpu_count() or 1
+DEFAULT_CPU_TARGET = int(os.environ.get("DP_HP_NUM_CPUS", NUM_AVAILABLE_CPUS))
+DEFAULT_INTER_THREADS = int(
+    os.environ.get("DP_HP_INTER_THREADS", max(1, DEFAULT_CPU_TARGET // 2))
+)
+DEFAULT_INTRA_THREADS = int(os.environ.get("DP_HP_INTRA_THREADS", DEFAULT_CPU_TARGET))
+
+# Limitar valores mínimos a 1 para evitar configuraciones inválidas
+DEFAULT_INTER_THREADS = max(1, DEFAULT_INTER_THREADS)
+DEFAULT_INTRA_THREADS = max(1, DEFAULT_INTRA_THREADS)
+
+os.environ.setdefault("OMP_NUM_THREADS", str(DEFAULT_INTRA_THREADS))
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", str(DEFAULT_INTRA_THREADS))
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", str(DEFAULT_INTER_THREADS))
+
+try:
+    tf.config.threading.set_inter_op_parallelism_threads(DEFAULT_INTER_THREADS)
+    tf.config.threading.set_intra_op_parallelism_threads(DEFAULT_INTRA_THREADS)
+    tf.config.set_soft_device_placement(True)
+except RuntimeError:
+    # Estas configuraciones solo pueden aplicarse antes de que TensorFlow inicialice el runtime.
+    pass
+
+AUTOTUNE = (
+    tf.data.AUTOTUNE if hasattr(tf.data, "AUTOTUNE") else tf.data.experimental.AUTOTUNE
+)
 
 # Configurar tqdm para que sea menos verboso
 tqdm.pandas = lambda *args, **kwargs: None
@@ -157,10 +153,9 @@ def model(features, labels, mode, params):
     # Calculate stddev for Gaussian noise: stddev = l2_norm_clip * noise_multiplier
     stddev = params["l2_norm_clip"] * params["noise_multiplier"]
     dp_sum_query = gaussian_query.GaussianSumQuery(
-        l2_norm_clip=params["l2_norm_clip"],
-        stddev=stddev
+        l2_norm_clip=params["l2_norm_clip"], stddev=stddev
     )
-    
+
     # Note: When using dp_sum_query, l2_norm_clip and noise_multiplier are already included
     # in the query, so they should not be passed separately to the optimizer
     optimizer = dp_optimizer.DPGradientDescentOptimizer(
@@ -191,19 +186,17 @@ def model(features, labels, mode, params):
 def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
     """
     Create input function for the Estimator.
-    Optimizado con prefetch y cache para mejor rendimiento.
     """
+
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
         if shuffle:
-            # Buffer más eficiente: min entre dataset size y buffer razonable
-            buffer_size = min(len(X), 10000) if len(X) > 0 else 1000
-            dataset = dataset.shuffle(buffer_size=buffer_size, reshuffle_each_iteration=True)
+            dataset = dataset.shuffle(buffer_size=len(X))
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size, drop_remainder=False)
-        # Estrategia 2: Optimizar tf.data pipeline con prefetch
-        dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)  # Prepara batches en paralelo
+        dataset = dataset.cache()
+        dataset = dataset.prefetch(AUTOTUNE)
         return dataset
 
     return input_fn
@@ -288,26 +281,40 @@ def main():
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
     # ============================================
-    CLIP_GRID = [0.5, 1.5]
-    NOISE_GRID = [ 0.8, 1.1]
-    LR_GRID = [0.01, 0.1]
+    CLIP_GRID = [0.5, 1.0, 1.5]
+    NOISE_GRID = [0.8, 1.0, 1.1]
+    LR_GRID = [0.01, 0.1, 0.25]
     THRESHOLD_GRID = [0.2]
     EPOCHS_GRID = [15, 25, 30]  # Rango de épocas entre 10 y 30
-    grid_combos = list(product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID))
+    grid_combos = list(
+        product(CLIP_GRID, NOISE_GRID, LR_GRID, THRESHOLD_GRID, EPOCHS_GRID)
+    )
     total_trials = len(grid_combos)
     print(f"Total number of hyperparameter combinations: {total_trials}")
-    print(f"Grid sizes: Clip={len(CLIP_GRID)}, Noise={len(NOISE_GRID)}, LR={len(LR_GRID)}, "
-          f"Threshold={len(THRESHOLD_GRID)}, Epochs={len(EPOCHS_GRID)}")
+    print(
+        f"Grid sizes: Clip={len(CLIP_GRID)}, Noise={len(NOISE_GRID)}, LR={len(LR_GRID)}, "
+        f"Threshold={len(THRESHOLD_GRID)}, Epochs={len(EPOCHS_GRID)}"
+    )
 
-    best = {"score": -float("inf"), "params": None, "epochs": None, "val_loss": float("inf")}
+    best = {
+        "score": -float("inf"),
+        "params": None,
+        "epochs": None,
+        "val_loss": float("inf"),
+    }
 
     with mlflow.start_run(run_name="DP-HPO"):
         # Log contexto de dataset
         mlflow.log_param("n_train", int(X_train.shape[0]))
         mlflow.log_param("n_test", int(X_test.shape[0]))
         mlflow.log_param("batch_size", 256)  # lo usas abajo
-        mlflow.log_param("selection_metric", "val_loss")  # Métrica usada para selección del mejor modelo
+        mlflow.log_param(
+            "selection_metric", "val_loss"
+        )  # Métrica usada para selección del mejor modelo
         mlflow.log_param("epsilon_threshold", 5.0)  # Threshold para early stopping
+        mlflow.log_param("cpu_available", DEFAULT_CPU_TARGET)
+        mlflow.log_param("tf_inter_threads", DEFAULT_INTER_THREADS)
+        mlflow.log_param("tf_intra_threads", DEFAULT_INTRA_THREADS)
 
         # Prepara input fns (reutilizables)
         batch_size = 256
@@ -326,32 +333,37 @@ def main():
         train_input = make_train_input()
         eval_input = make_eval_input()
         eval_steps = max(1, X_test.shape[0] // batch_size)
-        
-        # Asegurar que los datos estén en float32 para mejor rendimiento GPU
-        if X_train.dtype != np.float32:
-            X_train = X_train.astype(np.float32)
-        if X_test.dtype != np.float32:
-            X_test = X_test.astype(np.float32)
+
+        session_config = tf.compat.v1.ConfigProto(
+            inter_op_parallelism_threads=DEFAULT_INTER_THREADS,
+            intra_op_parallelism_threads=DEFAULT_INTRA_THREADS,
+            allow_soft_placement=True,
+            device_count={"CPU": DEFAULT_CPU_TARGET},
+        )
+        run_config = tf_estimator.RunConfig(
+            session_config=session_config,
+            log_step_count_steps=steps_per_epoch,
+        )
 
     trial_num = 0
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("INICIANDO BÚSQUEDA DE HIPERPARÁMETROS")
     print(f"Total de combinaciones a probar: {total_trials}")
-    print("="*80 + "\n")
-    
+    print("=" * 80 + "\n")
+
     # Crear barra de progreso con información detallada
     pbar = tqdm(
         grid_combos,
         desc="HPO Progress",
         total=total_trials,
         unit="trial",
-        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-        ncols=100
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        ncols=100,
     )
-    
+
     for clip, noise, lr, threshold, total_epochs in pbar:
         trial_num += 1
-        
+
         # Actualizar descripción de la barra con información del trial actual
         pbar.set_description(
             f"Trial {trial_num}/{total_trials} | clip={clip} noise={noise} lr={lr} thr={threshold} ep={total_epochs}"
@@ -365,15 +377,9 @@ def main():
             "pred_threshold": threshold,
         }
 
-        run_name = f"clip={clip}_noise={noise}_lr={lr}_thr={threshold}_ep={total_epochs}"
-        
-        # Estrategia 3: Limpiar sesión ANTES de crear nuevo Estimator (evita acumulación)
-        tf.keras.backend.clear_session()
-        gc.collect()
-        
-        # Crear directorio temporal único para este trial (se limpiará después)
-        model_dir = tempfile.mkdtemp(prefix=f"tf_estimator_trial_{trial_num}_")
-        
+        run_name = (
+            f"clip={clip}_noise={noise}_lr={lr}_thr={threshold}_ep={total_epochs}"
+        )
         with mlflow.start_run(run_name=run_name, nested=True):
             # Log params del trial
             mlflow.log_param("l2_norm_clip", clip)
@@ -383,23 +389,10 @@ def main():
             mlflow.log_param("num_microbatches", 32)
             mlflow.log_param("epochs", total_epochs)
 
-            # Crear Estimator con directorio específico para este trial
             fraud_classifier = tf_estimator.Estimator(
-                model_fn=model, 
-                params=trial_params,
-                model_dir=model_dir,
-                config=tf_estimator.RunConfig(
-                    save_checkpoints_steps=None,  # No guardar checkpoints intermedios
-                    save_checkpoints_secs=None,
-                    save_summary_steps=None,
-                    log_step_count_steps=None,  # Reducir logging
-                    keep_checkpoint_max=1  # Mantener solo 1 checkpoint
-                )
+                model_fn=model, params=trial_params, config=run_config
             )
 
-            # Estrategia 4: Acumular métricas para batch logging
-            metrics_batch = []
-            
             # === entrenamiento por épocas ===
             for epoch in range(1, total_epochs + 1):
                 t0 = time.time()
@@ -411,27 +404,17 @@ def main():
                     input_fn=eval_input, steps=eval_steps
                 )
 
-                # Estrategia 4: Acumular métricas básicas en lugar de loguear inmediatamente
-                metrics_batch.append({
-                    "eval_loss": float(eval_results["loss"]),
-                    "accuracy": float(eval_results["accuracy"]),
-                    "auroc": float(eval_results["auroc"]),
-                    "auprc": float(eval_results["auprc"]),
-                    "step": epoch
-                })
-                
-                # Loguear en batch cada 5 épocas o en la última
-                if epoch % 5 == 0 or epoch == total_epochs:
-                    for metric in metrics_batch:
-                        mlflow.log_metric("eval_loss", metric["eval_loss"], step=metric["step"])
-                        mlflow.log_metric("accuracy", metric["accuracy"], step=metric["step"])
-                        mlflow.log_metric("auroc", metric["auroc"], step=metric["step"])
-                        mlflow.log_metric("auprc", metric["auprc"], step=metric["step"])
-                    metrics_batch = []  # Limpiar batch después de loguear
+                # MLflow logs - solo métricas básicas cada epoch (optimización 3)
+                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
+                mlflow.log_metric(
+                    "accuracy", float(eval_results["accuracy"]), step=epoch
+                )
+                mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
+                mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
                 # Métricas detalladas solo cada 5 épocas o en la última (optimización 3)
                 log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
-                
+
                 if log_detailed:
                     preds = list(fraud_classifier.predict(input_fn=eval_input))
                     y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
@@ -442,12 +425,16 @@ def main():
                     mlflow.log_metric(
                         "precision_class_0", report["0"]["precision"], step=epoch
                     )
-                    mlflow.log_metric("recall_class_0", report["0"]["recall"], step=epoch)
+                    mlflow.log_metric(
+                        "recall_class_0", report["0"]["recall"], step=epoch
+                    )
                     mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
                     mlflow.log_metric(
                         "precision_class_1", report["1"]["precision"], step=epoch
                     )
-                    mlflow.log_metric("recall_class_1", report["1"]["recall"], step=epoch)
+                    mlflow.log_metric(
+                        "recall_class_1", report["1"]["recall"], step=epoch
+                    )
                     mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
                     mlflow.log_metric(
                         "precision_macro", report["macro avg"]["precision"], step=epoch
@@ -464,7 +451,7 @@ def main():
                         epoch, noise, X_train.shape[0], batch_size, 1e-6
                     )
                     mlflow.log_metric("epsilon", epsilon, step=epoch)
-                    
+
                     # Early stopping si epsilon > 5
                     if epsilon > 5.0:
                         mlflow.log_param("early_stopped", True)
@@ -473,35 +460,25 @@ def main():
                         break
                 else:
                     epsilon = 0.0
-            
+
             # Optimización 1 y 2: Predict, classification_report y confusion matrix solo al final del trial
             preds = list(fraud_classifier.predict(input_fn=eval_input))
             y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
             report = classification_report(
                 y_test[: len(y_pred)], y_pred, output_dict=True
             )
-            
+
             # Log métricas finales detalladas
-            mlflow.log_metric(
-                "precision_class_0_final", report["0"]["precision"]
-            )
+            mlflow.log_metric("precision_class_0_final", report["0"]["precision"])
             mlflow.log_metric("recall_class_0_final", report["0"]["recall"])
             mlflow.log_metric("f1_class_0_final", report["0"]["f1-score"])
-            mlflow.log_metric(
-                "precision_class_1_final", report["1"]["precision"]
-            )
+            mlflow.log_metric("precision_class_1_final", report["1"]["precision"])
             mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
             mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
-            mlflow.log_metric(
-                "precision_macro_final", report["macro avg"]["precision"]
-            )
-            mlflow.log_metric(
-                "recall_macro_final", report["macro avg"]["recall"]
-            )
-            mlflow.log_metric(
-                "f1_macro_final", report["macro avg"]["f1-score"]
-            )
-            
+            mlflow.log_metric("precision_macro_final", report["macro avg"]["precision"])
+            mlflow.log_metric("recall_macro_final", report["macro avg"]["recall"])
+            mlflow.log_metric("f1_macro_final", report["macro avg"]["f1-score"])
+
             # Confusion matrix solo al final (optimización 2)
             cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
             cm_df = pd.DataFrame(
@@ -513,17 +490,19 @@ def main():
             os.remove(cm_csv_path)
 
             # criterio de selección del trial: usar val_loss (minimizar pérdida)
-            trial_score = -float(eval_results["loss"])  # Negativo porque buscamos mínimo pérdida
+            trial_score = -float(
+                eval_results["loss"]
+            )  # Negativo porque buscamos mínimo pérdida
             mlflow.log_metric("trial_score", -trial_score)  # Log como pérdida positiva
             mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
-            
+
             # Obtener métricas finales del trial
             final_auprc = float(eval_results["auprc"])
             final_auroc = float(eval_results["auroc"])
             final_acc = float(eval_results["accuracy"])
             final_loss = float(eval_results["loss"])
             final_epsilon = epsilon if noise > 0 else 0.0
-            
+
             # Determinar si es el mejor
             is_best = trial_score > best["score"]
             if is_best:  # Mayor score = menor pérdida (porque es negativo)
@@ -531,19 +510,24 @@ def main():
                 best["params"] = trial_params
                 best["epochs"] = epoch  # Usar epoch actual en caso de early stopping
                 best["val_loss"] = float(eval_results["loss"])
-            
+
             # Actualizar la barra de progreso con información del trial
             status_msg = f"Loss={final_loss:.4f} | AUPRC={final_auprc:.4f}"
             if is_best:
                 status_msg += " ⭐ BEST"
             pbar.set_postfix_str(status_msg)
-            
+
             # Imprimir resultados del trial de forma clara y detallada (resumen)
             # Solo imprimir cada N trials o cuando hay un nuevo mejor modelo para no saturar
-            if is_best or trial_num == 1 or trial_num % 10 == 0 or trial_num == total_trials:
-                print("\n" + "="*80, flush=True)
+            if (
+                is_best
+                or trial_num == 1
+                or trial_num % 10 == 0
+                or trial_num == total_trials
+            ):
+                print("\n" + "=" * 80, flush=True)
                 print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
-                print("="*80, flush=True)
+                print("=" * 80, flush=True)
                 print(f"Hiperparámetros:", flush=True)
                 print(f"  • L2 Norm Clip:     {clip}", flush=True)
                 print(f"  • Noise Multiplier:  {noise}", flush=True)
@@ -557,41 +541,22 @@ def main():
                 print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
                 if noise > 0:
                     print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
-                print(f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}", flush=True)
+                print(
+                    f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}",
+                    flush=True,
+                )
                 if is_best:
-                    print(f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)", flush=True)
+                    print(
+                        f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)",
+                        flush=True,
+                    )
                 else:
                     print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
-                    print(f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}", flush=True)
-                print("="*80 + "\n", flush=True)
-            
-            # Estrategia 3: Limpieza completa después de cada trial
-            # 1. Cerrar y eliminar el Estimator
-            del fraud_classifier
-            
-            # 2. Limpiar directorio temporal del modelo
-            try:
-                if os.path.exists(model_dir):
-                    shutil.rmtree(model_dir, ignore_errors=True)
-            except Exception as e:
-                pass  # Ignorar errores de limpieza
-            
-            # 3. Limpiar sesión de TensorFlow
-            tf.keras.backend.clear_session()
-            
-            # 4. Limpiar variables locales (solo si existen)
-            try:
-                del preds, y_pred, report, cm, cm_df
-            except:
-                pass
-            try:
-                del metrics_batch
-            except:
-                pass
-            
-            # 5. Forzar garbage collection múltiples veces
-            gc.collect()
-            gc.collect()  # Segundo collect para asegurar limpieza completa
+                    print(
+                        f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}",
+                        flush=True,
+                    )
+                print("=" * 80 + "\n", flush=True)
 
         # ============================================
         # Re-entrenar final con los mejores HPs encontrados
@@ -602,7 +567,7 @@ def main():
             mlflow.log_param("epochs", best["epochs"])
 
             fraud_classifier = tf_estimator.Estimator(
-                model_fn=model, params=best["params"]
+                model_fn=model, params=best["params"], config=run_config
             )
             final_noise = best["params"]["noise_multiplier"]
             for epoch in range(1, best["epochs"] + 1):
@@ -616,7 +581,7 @@ def main():
                 )
                 mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
                 mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
-                
+
                 # Early stopping también en entrenamiento final si epsilon > 5
                 if final_noise > 0:
                     epsilon = compute_epsP(
@@ -624,7 +589,9 @@ def main():
                     )
                     mlflow.log_metric("epsilon", epsilon, step=epoch)
                     if epsilon > 5.0:
-                        print(f"\n>> Early stopping in final training: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}")
+                        print(
+                            f"\n>> Early stopping in final training: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}"
+                        )
                         break
 
             # Reporte final y CM
