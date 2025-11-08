@@ -65,6 +65,7 @@ AUTOTUNE = (
     tf.data.AUTOTUNE if hasattr(tf.data, "AUTOTUNE") else tf.data.experimental.AUTOTUNE
 )
 
+
 # -----------------------------------------------------------------------------
 # Utilidades de diagnóstico
 # -----------------------------------------------------------------------------
@@ -143,7 +144,7 @@ def print_hardware_summary(summary_dict):
     if summary_dict.get("cpu_percent") is not None:
         print(f"  • Uso CPU global al inicio: {summary_dict['cpu_percent']:.1f}%")
     if summary_dict.get("ram_total_bytes") is not None:
-        gb = 1024 ** 3
+        gb = 1024**3
         print(
             f"  • RAM total / disponible (GB): "
             f"{summary_dict['ram_total_bytes'] / gb:.2f} / "
@@ -390,7 +391,7 @@ def main():
     print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}\n")
 
     # Training params
-    batch_size = 256
+    batch_size = 512
     steps_per_epoch = X_train.shape[0] // batch_size
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
