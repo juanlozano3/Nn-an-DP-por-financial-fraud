@@ -391,7 +391,7 @@ def main():
     print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}\n")
 
     # Training params
-    batch_size = 256
+    batch_size = 1024
     steps_per_epoch = X_train.shape[0] // batch_size
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
@@ -422,7 +422,7 @@ def main():
         # Log contexto de dataset
         mlflow.log_param("n_train", int(X_train.shape[0]))
         mlflow.log_param("n_test", int(X_test.shape[0]))
-        mlflow.log_param("batch_size", 256)  # lo usas abajo
+        mlflow.log_param("batch_size", batch_size)  # lo usas abajo
         mlflow.log_param(
             "selection_metric", "val_loss"
         )  # Métrica usada para selección del mejor modelo
@@ -439,7 +439,7 @@ def main():
                 mlflow.log_param(f"resource_{key}", value)
 
         # Prepara input fns (reutilizables)
-        batch_size = 256
+        batch_size = 1024
         steps_per_epoch = max(1, X_train.shape[0] // batch_size)
 
         def make_train_input():
