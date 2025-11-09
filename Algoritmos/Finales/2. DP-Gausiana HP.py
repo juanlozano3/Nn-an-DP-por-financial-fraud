@@ -391,7 +391,7 @@ def main():
     print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}\n")
 
     # Training params
-    batch_size = 512
+    batch_size = 256
     steps_per_epoch = X_train.shape[0] // batch_size
     # ============================================
     # HPO grid: l2_norm_clip, noise_multiplier, learning_rate, threshold, epochs
