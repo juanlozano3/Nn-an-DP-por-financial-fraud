@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import shutil
 
 import tensorflow as tf
 from tensorflow import estimator as tf_estimator
@@ -252,12 +253,12 @@ def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
 
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
+        dataset = dataset.cache()
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=len(X))
+            dataset = dataset.shuffle(buffer_size=len(X), reshuffle_each_iteration=True)
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size, drop_remainder=False)
-        dataset = dataset.cache()
         dataset = dataset.prefetch(AUTOTUNE)
         options = tf.data.Options()
         try:
@@ -478,162 +479,182 @@ def main():
             mlflow.log_param("num_microbatches", 32)
             mlflow.log_param("epochs", total_epochs)
 
+            trial_model_dir = os.path.join(
+                "mlruns", "tmp_estimator", "dp_sgd_hp", f"trial_{trial_num:03d}"
+            )
+            os.makedirs(trial_model_dir, exist_ok=True)
+
             fraud_classifier = tf_estimator.Estimator(
-                model_fn=model, params=trial_params, config=run_config
+                model_fn=model,
+                params=trial_params,
+                config=run_config.replace(model_dir=trial_model_dir),
             )
 
-            for epoch in range(1, total_epochs + 1):
-                fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
-                eval_results = fraud_classifier.evaluate(
-                    input_fn=eval_input, steps=eval_steps
+            try:
+                for epoch in range(1, total_epochs + 1):
+                    fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
+                    eval_results = fraud_classifier.evaluate(
+                        input_fn=eval_input, steps=eval_steps
+                    )
+
+                    mlflow.log_metric(
+                        "eval_loss", float(eval_results["loss"]), step=epoch
+                    )
+                    mlflow.log_metric(
+                        "accuracy", float(eval_results["accuracy"]), step=epoch
+                    )
+                    mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
+                    mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
+
+                    log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
+
+                    if log_detailed:
+                        preds = list(fraud_classifier.predict(input_fn=eval_input))
+                        y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+                        report = classification_report(
+                            y_test[: len(y_pred)], y_pred, output_dict=True
+                        )
+
+                        mlflow.log_metric(
+                            "precision_class_0", report["0"]["precision"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "recall_class_0", report["0"]["recall"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "f1_class_0", report["0"]["f1-score"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "precision_class_1", report["1"]["precision"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "recall_class_1", report["1"]["recall"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "f1_class_1", report["1"]["f1-score"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "precision_macro",
+                            report["macro avg"]["precision"],
+                            step=epoch,
+                        )
+                        mlflow.log_metric(
+                            "recall_macro", report["macro avg"]["recall"], step=epoch
+                        )
+                        mlflow.log_metric(
+                            "f1_macro", report["macro avg"]["f1-score"], step=epoch
+                        )
+
+                    if noise > 0:
+                        epsilon = compute_epsilon(
+                            epoch,
+                            noise,
+                            X_train.shape[0],
+                            batch_size,
+                            delta=1.0 / X_train.shape[0],
+                        )
+                        mlflow.log_metric("epsilon", epsilon, step=epoch)
+                        if epsilon > 5.0:
+                            mlflow.log_param("early_stopped", True)
+                            mlflow.log_param("early_stop_epoch", epoch)
+                            mlflow.log_param("early_stop_reason", "epsilon > 5.0")
+                            break
+                    else:
+                        epsilon = 0.0
+
+                preds = list(fraud_classifier.predict(input_fn=eval_input))
+                y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
+                report = classification_report(
+                    y_test[: len(y_pred)], y_pred, output_dict=True
                 )
 
-                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
+                mlflow.log_metric("precision_class_0_final", report["0"]["precision"])
+                mlflow.log_metric("recall_class_0_final", report["0"]["recall"])
+                mlflow.log_metric("f1_class_0_final", report["0"]["f1-score"])
+                mlflow.log_metric("precision_class_1_final", report["1"]["precision"])
+                mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
+                mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
                 mlflow.log_metric(
-                    "accuracy", float(eval_results["accuracy"]), step=epoch
+                    "precision_macro_final", report["macro avg"]["precision"]
                 )
-                mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
-                mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
+                mlflow.log_metric("recall_macro_final", report["macro avg"]["recall"])
+                mlflow.log_metric("f1_macro_final", report["macro avg"]["f1-score"])
 
-                log_detailed = (epoch % 5 == 0) or (epoch == total_epochs)
-
-                if log_detailed:
-                    preds = list(fraud_classifier.predict(input_fn=eval_input))
-                    y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
-                    report = classification_report(
-                        y_test[: len(y_pred)], y_pred, output_dict=True
-                    )
-
-                    mlflow.log_metric(
-                        "precision_class_0", report["0"]["precision"], step=epoch
-                    )
-                    mlflow.log_metric(
-                        "recall_class_0", report["0"]["recall"], step=epoch
-                    )
-                    mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
-                    mlflow.log_metric(
-                        "precision_class_1", report["1"]["precision"], step=epoch
-                    )
-                    mlflow.log_metric(
-                        "recall_class_1", report["1"]["recall"], step=epoch
-                    )
-                    mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
-                    mlflow.log_metric(
-                        "precision_macro", report["macro avg"]["precision"], step=epoch
-                    )
-                    mlflow.log_metric(
-                        "recall_macro", report["macro avg"]["recall"], step=epoch
-                    )
-                    mlflow.log_metric(
-                        "f1_macro", report["macro avg"]["f1-score"], step=epoch
-                    )
-
-                if noise > 0:
-                    epsilon = compute_epsilon(
-                        epoch,
-                        noise,
-                        X_train.shape[0],
-                        batch_size,
-                        delta=1.0 / X_train.shape[0],
-                    )
-                    mlflow.log_metric("epsilon", epsilon, step=epoch)
-                    if epsilon > 5.0:
-                        mlflow.log_param("early_stopped", True)
-                        mlflow.log_param("early_stop_epoch", epoch)
-                        mlflow.log_param("early_stop_reason", "epsilon > 5.0")
-                        break
-                else:
-                    epsilon = 0.0
-
-            preds = list(fraud_classifier.predict(input_fn=eval_input))
-            y_pred = [1 if p["prob"][0] > threshold else 0 for p in preds]
-            report = classification_report(
-                y_test[: len(y_pred)], y_pred, output_dict=True
-            )
-
-            mlflow.log_metric("precision_class_0_final", report["0"]["precision"])
-            mlflow.log_metric("recall_class_0_final", report["0"]["recall"])
-            mlflow.log_metric("f1_class_0_final", report["0"]["f1-score"])
-            mlflow.log_metric("precision_class_1_final", report["1"]["precision"])
-            mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
-            mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
-            mlflow.log_metric("precision_macro_final", report["macro avg"]["precision"])
-            mlflow.log_metric("recall_macro_final", report["macro avg"]["recall"])
-            mlflow.log_metric("f1_macro_final", report["macro avg"]["f1-score"])
-
-            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
-            cm_df = pd.DataFrame(
-                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-            )
-            cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_final.csv"
-            cm_df.to_csv(cm_csv_path)
-            mlflow.log_artifact(cm_csv_path)
-            os.remove(cm_csv_path)
-
-            trial_score = -float(eval_results["loss"])
-            mlflow.log_metric("trial_score", -trial_score)
-            mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
-
-            final_auprc = float(eval_results["auprc"])
-            final_auroc = float(eval_results["auroc"])
-            final_acc = float(eval_results["accuracy"])
-            final_loss = float(eval_results["loss"])
-            final_epsilon = epsilon if noise > 0 else 0.0
-
-            is_best = trial_score > best["score"]
-            if is_best:
-                best["score"] = trial_score
-                best["params"] = trial_params
-                best["epochs"] = epoch
-                best["val_loss"] = float(eval_results["loss"])
-                best["summary"] = (
-                    f"Loss={final_loss:.4f}, AUPRC={final_auprc:.4f}, "
-                    f"AUROC={final_auroc:.4f}, ACC={final_acc:.4f}, EPS={final_epsilon:.4f}"
+                cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+                cm_df = pd.DataFrame(
+                    cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
                 )
+                cm_csv_path = f"cm_clip{clip}_noise{noise}_lr{lr}_thr{threshold}_ep{total_epochs}_final.csv"
+                cm_df.to_csv(cm_csv_path)
+                mlflow.log_artifact(cm_csv_path)
+                os.remove(cm_csv_path)
 
-            status_msg = f"Loss={final_loss:.4f} | AUPRC={final_auprc:.4f}"
-            if is_best:
-                status_msg += " ⭐ BEST"
-            pbar.set_postfix_str(status_msg)
+                trial_score = -float(eval_results["loss"])
+                mlflow.log_metric("trial_score", -trial_score)
+                mlflow.log_metric("val_loss_final", float(eval_results["loss"]))
 
-            if (
-                is_best
-                or trial_num == 1
-                or trial_num % 10 == 0
-                or trial_num == total_trials
-            ):
-                print("\n" + "=" * 80, flush=True)
-                print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
-                print("=" * 80, flush=True)
-                print(f"Hiperparámetros:", flush=True)
-                print(f"  • L2 Norm Clip:     {clip}", flush=True)
-                print(f"  • Noise Multiplier:  {noise}", flush=True)
-                print(f"  • Learning Rate:     {lr}", flush=True)
-                print(f"  • Threshold:         {threshold}", flush=True)
-                print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
-                print(f"\nMétricas Finales del Trial:", flush=True)
-                print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
-                print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
-                print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
-                print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
-                if noise > 0:
-                    print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
-                print(
-                    f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}",
-                    flush=True,
-                )
+                final_auprc = float(eval_results["auprc"])
+                final_auroc = float(eval_results["auroc"])
+                final_acc = float(eval_results["accuracy"])
+                final_loss = float(eval_results["loss"])
+                final_epsilon = epsilon if noise > 0 else 0.0
+
+                is_best = trial_score > best["score"]
                 if is_best:
+                    best["score"] = trial_score
+                    best["params"] = trial_params
+                    best["epochs"] = epoch
+                    best["val_loss"] = float(eval_results["loss"])
+                    best["summary"] = (
+                        f"Loss={final_loss:.4f}, AUPRC={final_auprc:.4f}, "
+                        f"AUROC={final_auroc:.4f}, ACC={final_acc:.4f}, EPS={final_epsilon:.4f}"
+                    )
+
+                status_msg = f"Loss={final_loss:.4f} | AUPRC={final_auprc:.4f}"
+                if is_best:
+                    status_msg += " ⭐ BEST"
+                pbar.set_postfix_str(status_msg)
+
+                if (
+                    is_best
+                    or trial_num == 1
+                    or trial_num % 10 == 0
+                    or trial_num == total_trials
+                ):
+                    print("\n" + "=" * 80, flush=True)
+                    print(f"TRIAL {trial_num}/{total_trials} COMPLETADO", flush=True)
+                    print("=" * 80, flush=True)
+                    print(f"Hiperparámetros:", flush=True)
+                    print(f"  • L2 Norm Clip:     {clip}", flush=True)
+                    print(f"  • Noise Multiplier:  {noise}", flush=True)
+                    print(f"  • Learning Rate:     {lr}", flush=True)
+                    print(f"  • Threshold:         {threshold}", flush=True)
+                    print(f"  • Epochs:            {epoch}/{total_epochs}", flush=True)
+                    print(f"\nMétricas Finales del Trial:", flush=True)
+                    print(f"  • Val Loss:          {final_loss:.4f}", flush=True)
+                    print(f"  • AUPRC:             {final_auprc:.4f}", flush=True)
+                    print(f"  • AUROC:             {final_auroc:.4f}", flush=True)
+                    print(f"  • Accuracy:          {final_acc:.4f}", flush=True)
+                    if noise > 0:
+                        print(f"  • Epsilon (ε):       {final_epsilon:.4f}", flush=True)
                     print(
-                        f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)",
+                        f"\n{'*** NUEVO MEJOR MODELO ***' if is_best else 'Comparación con el mejor:'}",
                         flush=True,
                     )
-                else:
-                    print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
-                    print(
-                        f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}",
-                        flush=True,
-                    )
-                print("=" * 80 + "\n", flush=True)
+                    if is_best:
+                        print(
+                            f"  Val Loss mejorado:   {final_loss:.4f} (nuevo mejor)",
+                            flush=True,
+                        )
+                    else:
+                        print(f"  Val Loss actual:      {final_loss:.4f}", flush=True)
+                        print(
+                            f"  Val Loss mejor:       {best.get('val_loss', float('inf')):.4f}",
+                            flush=True,
+                        )
+                    print("=" * 80 + "\n", flush=True)
+            finally:
+                shutil.rmtree(trial_model_dir, ignore_errors=True)
 
     if not best["params"]:
         raise RuntimeError("No se encontró un mejor conjunto de hiperparámetros.")
@@ -643,52 +664,63 @@ def main():
             mlflow.log_param(k, v)
         mlflow.log_param("epochs", best["epochs"])
 
+        final_model_dir = os.path.join(
+            "mlruns", "tmp_estimator", "dp_sgd_hp", "final_best"
+        )
+        os.makedirs(final_model_dir, exist_ok=True)
+
         fraud_classifier = tf_estimator.Estimator(
-            model_fn=model, params=best["params"], config=run_config
+            model_fn=model,
+            params=best["params"],
+            config=run_config.replace(model_dir=final_model_dir),
         )
         final_noise = best["params"]["noise_multiplier"]
-        for epoch in range(1, best["epochs"] + 1):
-            fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
-            eval_results = fraud_classifier.evaluate(
-                input_fn=eval_input, steps=eval_steps
-            )
-            mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
-            mlflow.log_metric("accuracy", float(eval_results["accuracy"]), step=epoch)
-            mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
-            mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
-
-            if final_noise > 0:
-                epsilon = compute_epsilon(
-                    epoch,
-                    noise,
-                    X_train.shape[0],
-                    batch_size,
-                    delta=1.0 / X_train.shape[0],
+        try:
+            for epoch in range(1, best["epochs"] + 1):
+                fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
+                eval_results = fraud_classifier.evaluate(
+                    input_fn=eval_input, steps=eval_steps
                 )
+                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
+                mlflow.log_metric(
+                    "accuracy", float(eval_results["accuracy"]), step=epoch
+                )
+                mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
+                mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
-                mlflow.log_metric("epsilon", epsilon, step=epoch)
-                if epsilon > 5.0:
-                    print(
-                        f"\n>> Early stopping in final training: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}"
+                if final_noise > 0:
+                    epsilon = compute_epsilon(
+                        epoch,
+                        noise,
+                        X_train.shape[0],
+                        batch_size,
+                        delta=1.0 / X_train.shape[0],
                     )
-                    break
+                    mlflow.log_metric("epsilon", epsilon, step=epoch)
+                    if epsilon > 5.0:
+                        print(
+                            f"\n>> Early stopping in final training: epsilon ({epsilon:.4f}) > 5.0 at epoch {epoch}"
+                        )
+                        break
 
-        final_threshold = best["params"]["pred_threshold"]
-        preds = list(fraud_classifier.predict(input_fn=eval_input))
-        y_pred = [1 if p["prob"][0] > final_threshold else 0 for p in preds]
-        report_text = classification_report(y_test[: len(y_pred)], y_pred, digits=4)
-        print("\nClassification Report (FINAL):\n", report_text)
-        mlflow.log_text(report_text, "final_classification_report.txt")
+            final_threshold = best["params"]["pred_threshold"]
+            preds = list(fraud_classifier.predict(input_fn=eval_input))
+            y_pred = [1 if p["prob"][0] > final_threshold else 0 for p in preds]
+            report_text = classification_report(y_test[: len(y_pred)], y_pred, digits=4)
+            print("\nClassification Report (FINAL):\n", report_text)
+            mlflow.log_text(report_text, "final_classification_report.txt")
 
-        cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
-        cm_df = pd.DataFrame(
-            cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-        )
-        cm_csv_path = "final_confusion_matrix.csv"
-        cm_df.to_csv(cm_csv_path)
-        mlflow.log_artifact(cm_csv_path)
-        os.remove(cm_csv_path)
-        best["final_confusion_matrix"] = cm_df
+            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
+            cm_df = pd.DataFrame(
+                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+            )
+            cm_csv_path = "final_confusion_matrix.csv"
+            cm_df.to_csv(cm_csv_path)
+            mlflow.log_artifact(cm_csv_path)
+            os.remove(cm_csv_path)
+            best["final_confusion_matrix"] = cm_df
+        finally:
+            shutil.rmtree(final_model_dir, ignore_errors=True)
 
     print("\n" + "=" * 80)
     print("MEJOR MODELO ENCONTRADO (DP-SGD)")
