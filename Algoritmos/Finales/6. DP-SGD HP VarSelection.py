@@ -260,12 +260,12 @@ def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
 
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
+        dataset = dataset.cache()
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=len(X))
+            dataset = dataset.shuffle(buffer_size=len(X), reshuffle_each_iteration=True)
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size, drop_remainder=False)
-        dataset = dataset.cache()
         dataset = dataset.prefetch(AUTOTUNE)
         options = tf.data.Options()
         try:
@@ -574,7 +574,9 @@ def main():
                             "f1_class_1", report["1"]["f1-score"], step=epoch
                         )
                         mlflow.log_metric(
-                            "precision_macro", report["macro avg"]["precision"], step=epoch
+                            "precision_macro",
+                            report["macro avg"]["precision"],
+                            step=epoch,
                         )
                         mlflow.log_metric(
                             "recall_macro", report["macro avg"]["recall"], step=epoch
@@ -584,8 +586,12 @@ def main():
                         )
 
                     if noise > 0:
-                        epsilon = compute_epsP(
-                            epoch, noise, X_train.shape[0], batch_size, 1e-6
+                        epsilon = compute_epsilon(
+                            epoch,
+                            noise,
+                            X_train.shape[0],
+                            batch_size,
+                            delta=1.0 / X_train.shape[0],
                         )
                         mlflow.log_metric("epsilon", epsilon, step=epoch)
                         if epsilon > 5.0:
@@ -608,7 +614,9 @@ def main():
                 mlflow.log_metric("precision_class_1_final", report["1"]["precision"])
                 mlflow.log_metric("recall_class_1_final", report["1"]["recall"])
                 mlflow.log_metric("f1_class_1_final", report["1"]["f1-score"])
-                mlflow.log_metric("precision_macro_final", report["macro avg"]["precision"])
+                mlflow.log_metric(
+                    "precision_macro_final", report["macro avg"]["precision"]
+                )
                 mlflow.log_metric("recall_macro_final", report["macro avg"]["recall"])
                 mlflow.log_metric("f1_macro_final", report["macro avg"]["f1-score"])
 
@@ -711,8 +719,12 @@ def main():
             mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
             if final_noise > 0:
-                epsilon = compute_epsP(
-                    epoch, final_noise, X_train.shape[0], batch_size, 1e-6
+                epsilon = compute_epsilon(
+                    epoch,
+                    noise,
+                    X_train.shape[0],
+                    batch_size,
+                    delta=1.0 / X_train.shape[0],
                 )
                 mlflow.log_metric("epsilon", epsilon, step=epoch)
                 if epsilon > 5.0:

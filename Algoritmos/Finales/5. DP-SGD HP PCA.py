@@ -146,7 +146,6 @@ def print_hardware_summary(summary_dict):
     print("=" * 80 + "\n")
 
 
-
 GDP_REPO = "../../Deep-Learning-with-GDP-Tensorflow"
 sys.path.append(GDP_REPO)
 from gdp_accountant import compute_epsP, compute_epsilon
@@ -261,12 +260,12 @@ def make_input_fn(X, y, batch_size, shuffle=True, repeat=True):
 
     def input_fn():
         dataset = tf.data.Dataset.from_tensor_slices(({"x": X}, y))
+        dataset = dataset.cache()
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=len(X))
+            dataset = dataset.shuffle(buffer_size=len(X), reshuffle_each_iteration=True)
         if repeat:
             dataset = dataset.repeat()
         dataset = dataset.batch(batch_size, drop_remainder=False)
-        dataset = dataset.cache()
         dataset = dataset.prefetch(AUTOTUNE)
         options = tf.data.Options()
         try:
@@ -372,7 +371,9 @@ def main():
     print(f"  • Balanceo: {dict(zip(unique_post, counts_post))}")
 
     # Selección inteligente de componentes PCA
-    def choose_pca_components(X, target_variance=0.95, min_components=10, max_components=300):
+    def choose_pca_components(
+        X, target_variance=0.95, min_components=10, max_components=300
+    ):
         full_pca = PCA()
         full_pca.fit(X)
         cum_var = np.cumsum(full_pca.explained_variance_ratio_)
@@ -387,7 +388,10 @@ def main():
     max_components = int(os.environ.get("DP_HP_PCA_MAX_COMPONENTS", 300))
     min_components = int(os.environ.get("DP_HP_PCA_MIN_COMPONENTS", 10))
     n_components, retained_var = choose_pca_components(
-        X_train, target_variance=target_variance, min_components=min_components, max_components=max_components
+        X_train,
+        target_variance=target_variance,
+        min_components=min_components,
+        max_components=max_components,
     )
 
     print(
@@ -525,9 +529,7 @@ def main():
                     input_fn=eval_input, steps=eval_steps
                 )
 
-                mlflow.log_metric(
-                    "eval_loss", float(eval_results["loss"]), step=epoch
-                )
+                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
                 mlflow.log_metric(
                     "accuracy", float(eval_results["accuracy"]), step=epoch
                 )
@@ -549,18 +551,14 @@ def main():
                     mlflow.log_metric(
                         "recall_class_0", report["0"]["recall"], step=epoch
                     )
-                    mlflow.log_metric(
-                        "f1_class_0", report["0"]["f1-score"], step=epoch
-                    )
+                    mlflow.log_metric("f1_class_0", report["0"]["f1-score"], step=epoch)
                     mlflow.log_metric(
                         "precision_class_1", report["1"]["precision"], step=epoch
                     )
                     mlflow.log_metric(
                         "recall_class_1", report["1"]["recall"], step=epoch
                     )
-                    mlflow.log_metric(
-                        "f1_class_1", report["1"]["f1-score"], step=epoch
-                    )
+                    mlflow.log_metric("f1_class_1", report["1"]["f1-score"], step=epoch)
                     mlflow.log_metric(
                         "precision_macro", report["macro avg"]["precision"], step=epoch
                     )
@@ -572,8 +570,12 @@ def main():
                     )
 
                 if noise > 0:
-                    epsilon = compute_epsP(
-                        epoch, noise, X_train.shape[0], batch_size, 1e-6
+                    epsilon = compute_epsilon(
+                        epoch,
+                        noise,
+                        X_train.shape[0],
+                        batch_size,
+                        delta=1.0 / X_train.shape[0],
                     )
                     mlflow.log_metric("epsilon", epsilon, step=epoch)
                     if epsilon > 5.0:
@@ -699,8 +701,12 @@ def main():
             mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
             if final_noise > 0:
-                epsilon = compute_epsP(
-                    epoch, final_noise, X_train.shape[0], batch_size, 1e-6
+                epsilon = compute_epsilon(
+                    epoch,
+                    noise,
+                    X_train.shape[0],
+                    batch_size,
+                    delta=1.0 / X_train.shape[0],
                 )
                 mlflow.log_metric("epsilon", epsilon, step=epoch)
                 if epsilon > 5.0:
@@ -739,56 +745,6 @@ def main():
         print("\nMatriz de confusión (mejor modelo):")
         print(best["final_confusion_matrix"])
     print("=" * 80 + "\n")
-
-            # criterio de selección del trial (igual que tenías)
-            trial_score = float(eval_results["auprc"])
-            mlflow.log_metric("trial_score", trial_score)
-
-            if trial_score > best["score"]:
-                best["score"] = trial_score
-                best["params"] = trial_params
-                best["epochs"] = total_epochs
-
-            print("\n>> Best (by AUPRC):", best)
-
-        # ============================================
-        # Re-entrenar final con los mejores HPs encontrados
-        # ============================================
-        with mlflow.start_run(run_name="FINAL_best", nested=True):
-            for k, v in best["params"].items():
-                mlflow.log_param(k, v)
-            mlflow.log_param("epochs", best["epochs"])
-
-            fraud_classifier = tf_estimator.Estimator(
-                model_fn=model, params=best["params"]
-            )
-            for epoch in range(1, best["epochs"] + 1):
-                fraud_classifier.train(input_fn=train_input, steps=steps_per_epoch)
-                eval_results = fraud_classifier.evaluate(
-                    input_fn=eval_input, steps=eval_steps
-                )
-                mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
-                mlflow.log_metric(
-                    "accuracy", float(eval_results["accuracy"]), step=epoch
-                )
-                mlflow.log_metric("auroc", float(eval_results["auroc"]), step=epoch)
-                mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
-
-            # Reporte final y CM
-            preds = list(fraud_classifier.predict(input_fn=eval_input))
-            y_pred = [1 if p["prob"][0] > prob_threshold else 0 for p in preds]
-            report_text = classification_report(y_test[: len(y_pred)], y_pred, digits=4)
-            print("\nClassification Report (FINAL):\n", report_text)
-            mlflow.log_text(report_text, "final_classification_report.txt")
-
-            cm = confusion_matrix(y_test[: len(y_pred)], y_pred)
-            cm_df = pd.DataFrame(
-                cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-            )
-            cm_csv_path = "final_confusion_matrix.csv"
-            cm_df.to_csv(cm_csv_path)
-            mlflow.log_artifact(cm_csv_path)
-            os.remove(cm_csv_path)
 
 
 if __name__ == "__main__":
