@@ -529,8 +529,12 @@ def main():
                     )
 
                 if noise > 0:
-                    epsilon = compute_epsP(
-                        epoch, noise, X_train.shape[0], batch_size, 1e-6
+                    epsilon = compute_epsilon(
+                        epoch,
+                        noise,
+                        X_train.shape[0],
+                        batch_size,
+                        delta=1.0 / X_train.shape[0],
                     )
                     mlflow.log_metric("epsilon", epsilon, step=epoch)
                     if epsilon > 5.0:
@@ -654,9 +658,14 @@ def main():
             mlflow.log_metric("auprc", float(eval_results["auprc"]), step=epoch)
 
             if final_noise > 0:
-                epsilon = compute_epsP(
-                    epoch, final_noise, X_train.shape[0], batch_size, 1e-6
+                epsilon = compute_epsilon(
+                    epoch,
+                    noise,
+                    X_train.shape[0],
+                    batch_size,
+                    delta=1.0 / X_train.shape[0],
                 )
+
                 mlflow.log_metric("epsilon", epsilon, step=epoch)
                 if epsilon > 5.0:
                     print(
