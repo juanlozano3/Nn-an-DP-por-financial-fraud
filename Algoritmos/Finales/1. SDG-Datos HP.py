@@ -17,6 +17,38 @@ import seaborn as sns
 import mlflow
 import mlflow.tensorflow
 from tqdm.auto import tqdm
+import warnings
+import logging
+
+# Suprimir warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+warnings.filterwarnings("ignore")
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+
+# =========================
+# Configuración de recursos de hardware
+# =========================
+NUM_AVAILABLE_CPUS = os.cpu_count() or 1
+DEFAULT_CPU_TARGET = int(os.environ.get("NUM_CPUS", NUM_AVAILABLE_CPUS))
+DEFAULT_INTER_THREADS = int(
+    os.environ.get("INTER_THREADS", max(1, DEFAULT_CPU_TARGET // 2))
+)
+DEFAULT_INTRA_THREADS = int(os.environ.get("INTRA_THREADS", DEFAULT_CPU_TARGET))
+
+# Limitar valores mínimos
+DEFAULT_INTER_THREADS = max(1, DEFAULT_INTER_THREADS)
+DEFAULT_INTRA_THREADS = max(1, DEFAULT_INTRA_THREADS)
+
+os.environ.setdefault("OMP_NUM_THREADS", str(DEFAULT_INTRA_THREADS))
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", str(DEFAULT_INTRA_THREADS))
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", str(DEFAULT_INTER_THREADS))
+
+try:
+    tf.config.threading.set_inter_op_parallelism_threads(DEFAULT_INTER_THREADS)
+    tf.config.threading.set_intra_op_parallelism_threads(DEFAULT_INTRA_THREADS)
+    tf.config.set_soft_device_placement(True)
+except RuntimeError:
+    pass
 
 # =========================
 # Semillas (reproducibilidad)
@@ -92,6 +124,91 @@ y_test = y_test.to_numpy().astype(np.int32)
 print("X train:", X_train.shape, "| X test:", X_test.shape)
 unique_post, counts_post = np.unique(y_train, return_counts=True)
 print("Después del balanceo:", dict(zip(unique_post, counts_post)))
+
+
+# =========================
+# Función para resumen de hardware
+# =========================
+def _maybe_import_psutil():
+    try:
+        import psutil
+
+        return psutil
+    except Exception:
+        return None
+
+
+def hardware_summary():
+    """Devuelve información relevante de CPU/RAM para registro y diagnóstico."""
+    psutil = _maybe_import_psutil()
+    cpu_freq = None
+    cpu_percent = None
+    ram_total = None
+    ram_available = None
+
+    if psutil:
+        try:
+            cpu_freq = psutil.cpu_freq()
+        except Exception:
+            cpu_freq = None
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+        except Exception:
+            cpu_percent = None
+        try:
+            virtual_mem = psutil.virtual_memory()
+            ram_total = getattr(virtual_mem, "total", None)
+            ram_available = getattr(virtual_mem, "available", None)
+        except Exception:
+            ram_total = None
+            ram_available = None
+
+    return {
+        "logical_cpus": NUM_AVAILABLE_CPUS,
+        "tf_intra_threads": DEFAULT_INTRA_THREADS,
+        "tf_inter_threads": DEFAULT_INTER_THREADS,
+        "cpu_freq_current_mhz": cpu_freq.current if cpu_freq else None,
+        "cpu_freq_max_mhz": cpu_freq.max if cpu_freq else None,
+        "cpu_percent": cpu_percent,
+        "ram_total_bytes": ram_total,
+        "ram_available_bytes": ram_available,
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+        "tf_env_intra": os.environ.get("TF_NUM_INTRAOP_THREADS"),
+        "tf_env_inter": os.environ.get("TF_NUM_INTEROP_THREADS"),
+    }
+
+
+def print_hardware_summary(summary_dict):
+    """Imprime en consola la configuración de hardware utilizada."""
+    print("\n" + "=" * 80)
+    print("RESUMEN DE RECURSOS PARA LA BÚSQUEDA DE HIPERPARÁMETROS")
+    print("=" * 80)
+    print(f"  • CPUs lógicas detectadas: {summary_dict['logical_cpus']}")
+    print(
+        f"  • Threads TF intra-op / inter-op: "
+        f"{summary_dict['tf_intra_threads']} / {summary_dict['tf_inter_threads']}"
+    )
+    print(
+        f"  • TF_NUM_INTRAOP_THREADS / TF_NUM_INTEROP_THREADS: "
+        f"{summary_dict['tf_env_intra']} / {summary_dict['tf_env_inter']}"
+    )
+    print(f"  • OMP_NUM_THREADS: {summary_dict['omp_num_threads']}")
+
+    if summary_dict.get("cpu_freq_current_mhz") is not None:
+        print(
+            f"  • Frecuencia CPU actual/max (MHz): "
+            f"{summary_dict['cpu_freq_current_mhz']:.0f} / {summary_dict['cpu_freq_max_mhz']:.0f}"
+        )
+    if summary_dict.get("cpu_percent") is not None:
+        print(f"  • Uso CPU global al inicio: {summary_dict['cpu_percent']:.1f}%")
+    if summary_dict.get("ram_total_bytes") is not None:
+        gb = 1024**3
+        print(
+            f"  • RAM total / disponible (GB): "
+            f"{summary_dict['ram_total_bytes'] / gb:.2f} / "
+            f"{summary_dict['ram_available_bytes'] / gb:.2f}"
+        )
+    print("=" * 80)
 
 
 # =========================
@@ -175,28 +292,38 @@ def build_model(
 
 
 # =========================
-# GRID SEARCH: Variar L2, learning_rate y épocas (solo SGD)
+# GRID SEARCH: Variar L2, learning_rate y épocas (ADAM - mejor para sin privacidad)
 # IMPORTANTE: Usar validación split del train, NO el test
 # Optimización por val_loss (mínimo)
 # Threshold fijo: 0.2
 # =========================
-OPTIMIZER = "sgd"  # Solo SGD
+OPTIMIZER = "adam"  # Adam funciona mejor para modelos sin privacidad diferencial
 THRESHOLD = 0.2  # Fijo
-L2_REG_CANDIDATES = [0.0, 1e-5, 1e-4, 1e-3]  # Reducido: 4 valores
+# Rangos expandidos para mejor búsqueda
+L2_REG_CANDIDATES = [0.0, 1e-6, 1e-5, 1e-4, 1e-3, 5e-3]  # Expandido: 6 valores
 LEARNING_RATE_CANDIDATES = [
+    1e-4,
+    5e-4,
     1e-3,
     5e-3,
     1e-2,
     5e-2,
-]  # Reducido: 4 valores (rangos para SGD)
-EPOCHS_CANDIDATES = [15, 20, 25, 30]  # Reducido: 4 valores
+]  # Expandido: 6 valores (rangos para Adam)
+EPOCHS_CANDIDATES = [
+    30,
+    40,
+    50,
+    60,
+    80,
+    100,
+]  # Expandido: más épocas para mejor convergencia
 BATCH_SIZE = 1024
 VAL_SPLIT = 0.2  # Usar 20% del train para validación
 
-# Callbacks - optimizar por val_loss
+# Callbacks - optimizar por val_loss (más permisivo para permitir mejor entrenamiento)
 stop_early = tf.keras.callbacks.EarlyStopping(
     monitor="val_loss",
-    patience=7,
+    patience=15,  # Aumentado de 7 a 15 para permitir más entrenamiento
     mode="min",
     restore_best_weights=True,
     verbose=0,
@@ -205,8 +332,8 @@ reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
     monitor="val_loss",
     mode="min",
     factor=0.5,
-    patience=3,
-    min_lr=1e-6,
+    patience=5,  # Aumentado de 3 a 5
+    min_lr=1e-7,  # Más bajo para permitir más ajuste fino
     verbose=0,
 )
 
@@ -219,12 +346,16 @@ best = {
     "epochs": None,
 }
 
+# Imprimir resumen de hardware
+hw_summary = hardware_summary()
+print_hardware_summary(hw_summary)
+
 print("\n" + "=" * 60)
-print(f"BÚSQUEDA DE HIPERPARÁMETROS")
+print(f"BÚSQUEDA DE HIPERPARÁMETROS (SIN PRIVACIDAD DIFERENCIAL)")
 print("=" * 60)
 print(f"Arquitectura fija: Dense({UNITS1}) -> Dense({UNITS2}) -> Dense(1)")
 print(f"Dropout fijo: {DROPOUT1} / {DROPOUT2}")
-print(f"Optimizador: {OPTIMIZER.upper()} (fijo)")
+print(f"Optimizador: {OPTIMIZER.upper()} (fijo) - MEJOR PARA SIN PRIVACIDAD")
 print(f"Threshold: {THRESHOLD} (fijo)")
 print(f"L2 regularization a probar: {L2_REG_CANDIDATES}")
 print(f"Learning rate a probar: {LEARNING_RATE_CANDIDATES}")
@@ -249,7 +380,7 @@ except Exception as e:
     pass
 
 # Run principal para el grid search
-with mlflow.start_run(run_name="Grid_Search_Optimizer_Dropout"):
+with mlflow.start_run(run_name="Grid_Search_No_DP_Optimized"):
     mlflow.log_param("architecture_units1", UNITS1)
     mlflow.log_param("architecture_units2", UNITS2)
     mlflow.log_param("optimizer", OPTIMIZER.upper())
@@ -258,6 +389,19 @@ with mlflow.start_run(run_name="Grid_Search_Optimizer_Dropout"):
     mlflow.log_param("threshold", THRESHOLD)
     mlflow.log_param("batch_size", BATCH_SIZE)
     mlflow.log_param("val_split", VAL_SPLIT)
+
+    # Log hardware resources
+    mlflow.log_param("num_cpus", hw_summary["logical_cpus"])
+    mlflow.log_param("tf_intra_threads", hw_summary["tf_intra_threads"])
+    mlflow.log_param("tf_inter_threads", hw_summary["tf_inter_threads"])
+    if hw_summary.get("ram_total_bytes"):
+        mlflow.log_param(
+            "ram_total_gb", round(hw_summary["ram_total_bytes"] / (1024**3), 2)
+        )
+    if hw_summary.get("ram_available_bytes"):
+        mlflow.log_param(
+            "ram_available_gb", round(hw_summary["ram_available_bytes"] / (1024**3), 2)
+        )
 
     # Crear todas las combinaciones para la barra de progreso
     all_combinations = [
@@ -657,7 +801,7 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     # =========================
     print("\n" + "=" * 80)
     print("=" * 80)
-    print("MEJOR MODELO ENCONTRADO (SIN PRIVACIDAD DIFERENCIAL)")
+    print("MEJOR MODELO ENCONTRADO (SIN PRIVACIDAD DIFERENCIAL - OPTIMIZADO)")
     print("=" * 80)
     print("=" * 80)
     print("\n📊 HIPERPARÁMETROS SELECCIONADOS:")
