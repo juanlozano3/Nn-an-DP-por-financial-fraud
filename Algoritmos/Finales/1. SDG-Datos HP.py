@@ -190,7 +190,7 @@ LEARNING_RATE_CANDIDATES = [
     5e-2,
 ]  # Reducido: 4 valores (rangos para SGD)
 EPOCHS_CANDIDATES = [15, 20, 25, 30]  # Reducido: 4 valores
-BATCH_SIZE = 256
+BATCH_SIZE = 1024
 VAL_SPLIT = 0.2  # Usar 20% del train para validación
 
 # Callbacks - optimizar por val_loss
