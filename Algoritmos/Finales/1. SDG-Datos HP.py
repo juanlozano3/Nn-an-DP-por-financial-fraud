@@ -636,19 +636,58 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     mlflow.log_artifact(cm_optimal_path)
     os.remove(cm_optimal_path)
 
-print("\n" + "=" * 60)
-print("RESUMEN FINAL:")
-print("=" * 60)
-print(f"Arquitectura: Dense({UNITS1}) -> Dense({UNITS2}) -> Dense(1)")
-print(f"Dropout capa 1/2: {DROPOUT1:.2f} / {DROPOUT2:.2f}")
-print(f"L2 regularization: {best['l2_reg']:.0e}")
-print(f"Optimizador: {OPTIMIZER.upper()}")
-print(f"Learning Rate: {best['learning_rate']:.0e}")
-print(f"Épocas: {best['epochs']}")
-print(f"Threshold usado: {THRESHOLD}")
-print(f"Batch Size: {BATCH_SIZE}")
-print(f"Umbral óptimo encontrado (F1): {best_thr_optimal:.3f}")
-print("=" * 60)
+    # =========================
+    # RESUMEN FINAL DEL MEJOR MODELO
+    # =========================
+    print("\n" + "=" * 80)
+    print("=" * 80)
+    print("MEJOR MODELO ENCONTRADO (SIN PRIVACIDAD DIFERENCIAL)")
+    print("=" * 80)
+    print("=" * 80)
+    print("\n📊 HIPERPARÁMETROS SELECCIONADOS:")
+    print("  • Arquitectura: Dense({}) -> Dense({}) -> Dense(1)".format(UNITS1, UNITS2))
+    print("  • Dropout capa 1/2: {:.2f} / {:.2f}".format(DROPOUT1, DROPOUT2))
+    print("  • Optimizador: {}".format(OPTIMIZER.upper()))
+    print("  • L2 regularization: {:.0e}".format(best["l2_reg"]))
+    print("  • Learning Rate: {:.0e}".format(best["learning_rate"]))
+    print("  • Épocas: {}".format(best["epochs"]))
+    print("  • Batch Size: {}".format(BATCH_SIZE))
+    print("  • Threshold usado en búsqueda: {}".format(THRESHOLD))
+    print("  • Umbral óptimo encontrado (F1): {:.3f}".format(best_thr_optimal))
+
+    print("\n📈 MÉTRICAS EN VALIDACIÓN (mejor epoch):")
+    print("  • Val Loss: {:.4f}".format(best["val_loss"]))
+
+    print("\n🎯 MÉTRICAS EN TEST (conjunto no visto):")
+    print("  • Test Loss: {:.4f}".format(test_loss))
+    print("  • Test Accuracy: {:.4f}".format(test_acc))
+
+    print("\n📋 MÉTRICAS CON THRESHOLD DE BÚSQUEDA ({:.2f}):".format(best_thr))
+    print("  • Precision (Clase 0): {:.4f}".format(report_search["0"]["precision"]))
+    print("  • Recall (Clase 0): {:.4f}".format(report_search["0"]["recall"]))
+    print("  • F1 (Clase 0): {:.4f}".format(report_search["0"]["f1-score"]))
+    print("  • Precision (Clase 1): {:.4f}".format(report_search["1"]["precision"]))
+    print("  • Recall (Clase 1): {:.4f}".format(report_search["1"]["recall"]))
+    print("  • F1 (Clase 1): {:.4f}".format(report_search["1"]["f1-score"]))
+    print(
+        "  • Precision (Macro): {:.4f}".format(report_search["macro avg"]["precision"])
+    )
+    print("  • Recall (Macro): {:.4f}".format(report_search["macro avg"]["recall"]))
+    print("  • F1 (Macro): {:.4f}".format(report_search["macro avg"]["f1-score"]))
+
+    print("\n📋 MÉTRICAS CON UMBRAL ÓPTIMO ({:.3f}):".format(best_thr_optimal))
+    print("  • Precision (Clase 1): {:.4f}".format(best_prec_optimal))
+    print("  • Recall (Clase 1): {:.4f}".format(best_rec_optimal))
+    print("  • F1 (Clase 1): {:.4f}".format(best_f1_optimal))
+
+    print("\n🔢 MATRIZ DE CONFUSIÓN (Threshold de búsqueda):")
+    print(cm_search_df)
+
+    print("\n🔢 MATRIZ DE CONFUSIÓN (Umbral óptimo):")
+    print(cm_optimal_df)
+
+    print("\n" + "=" * 80)
+    print("=" * 80)
 
 """
 This code was adapted from the TensorFlow Privacy tutorial on classification privacy.:
