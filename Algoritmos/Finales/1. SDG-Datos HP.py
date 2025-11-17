@@ -241,7 +241,12 @@ print("=" * 60)
 # =========================
 # Configurar MLflow
 # =========================
-mlflow.set_experiment("DP-Fraud-Detection-Final")
+try:
+    mlflow.set_experiment("DP-Fraud-Detection-Final")
+except Exception as e:
+    print(f"Advertencia al configurar experimento MLflow: {e}")
+    print("Continuando con el experimento por defecto...")
+    pass
 
 # Run principal para el grid search
 with mlflow.start_run(run_name="Grid_Search_Optimizer_Dropout"):
@@ -419,12 +424,16 @@ with mlflow.start_run(run_name="Grid_Search_Optimizer_Dropout"):
     mlflow.log_param("best_epochs", best["epochs"])
     mlflow.log_metric("best_val_loss_found", best["val_loss"])
 
-    # Guardar CSV de resultados como artifact
-    mlflow.log_artifact("optimizer_search_results.csv")
+    # Convertir resultados a DataFrame y guardar CSV ANTES de loguearlo
+    results_df = pd.DataFrame(results)
+    results_df.to_csv("optimizer_search_results.csv", index=False)
+
+    # Guardar CSV de resultados como artifact (solo si existe)
+    if os.path.exists("optimizer_search_results.csv"):
+        mlflow.log_artifact("optimizer_search_results.csv")
 
 
-# Convertir resultados a DataFrame y ordenar por val_loss (ascendente)
-results_df = pd.DataFrame(results)
+# Ordenar resultados por val_loss (ascendente) - results_df ya fue creado arriba
 results_sorted = results_df.sort_values("val_loss", ascending=True)
 
 print("\n" + "=" * 60)
@@ -441,8 +450,7 @@ for _, row in results_sorted.head(15).iterrows():
         f"{row['val_loss']:<12.4f} {row['val_acc']:<12.4f} {row['val_f1_1']:<8.4f}"
     )
 
-# Guardar resultados a CSV
-results_df.to_csv("optimizer_search_results.csv", index=False)
+# CSV ya fue guardado arriba antes del logueo en MLflow
 
 print("\n" + "=" * 60)
 print("MEJOR COMBINACIÓN ENCONTRADA:")
