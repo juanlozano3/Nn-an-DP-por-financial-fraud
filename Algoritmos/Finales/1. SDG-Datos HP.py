@@ -522,14 +522,30 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     # =========================
     # Evaluación en TEST (no usado durante búsqueda)
     # =========================
-    test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
+    test_metrics = best_model.evaluate(X_test, y_test, verbose=0)
+    # evaluate devuelve: [loss, accuracy, precision, recall, auroc, auprc]
+    test_loss = test_metrics[0]
+    test_acc = test_metrics[1]
+    test_precision = test_metrics[2]
+    test_recall = test_metrics[3]
+    test_auroc = test_metrics[4]
+    test_auprc = test_metrics[5]
+
     print(f"\n>>> EVALUACIÓN EN TEST (conjunto no visto durante búsqueda):")
     print(f"    Test loss: {test_loss:.4f}")
     print(f"    Test accuracy: {test_acc:.4f}")
+    print(f"    Test precision: {test_precision:.4f}")
+    print(f"    Test recall: {test_recall:.4f}")
+    print(f"    Test AUROC: {test_auroc:.4f}")
+    print(f"    Test AUPRC: {test_auprc:.4f}")
 
     # Log métricas de test
     mlflow.log_metric("test_loss", float(test_loss))
     mlflow.log_metric("test_accuracy", float(test_acc))
+    mlflow.log_metric("test_precision", float(test_precision))
+    mlflow.log_metric("test_recall", float(test_recall))
+    mlflow.log_metric("test_auroc", float(test_auroc))
+    mlflow.log_metric("test_auprc", float(test_auprc))
 
     # Predicciones
     y_pred_prob = best_model.predict(X_test, verbose=0).ravel()
@@ -661,6 +677,10 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     print("\n🎯 MÉTRICAS EN TEST (conjunto no visto):")
     print("  • Test Loss: {:.4f}".format(test_loss))
     print("  • Test Accuracy: {:.4f}".format(test_acc))
+    print("  • Test Precision: {:.4f}".format(test_precision))
+    print("  • Test Recall: {:.4f}".format(test_recall))
+    print("  • Test AUROC: {:.4f}".format(test_auroc))
+    print("  • Test AUPRC: {:.4f}".format(test_auprc))
 
     print("\n📋 MÉTRICAS CON THRESHOLD DE BÚSQUEDA ({:.2f}):".format(best_thr))
     print("  • Precision (Clase 0): {:.4f}".format(report_search["0"]["precision"]))
