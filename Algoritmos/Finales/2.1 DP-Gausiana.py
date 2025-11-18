@@ -103,12 +103,14 @@ def model(features, labels, mode, params):
     )
 
     # --- OPTIMIZADOR DP ---
-    dp_sum_query = gaussian_query.GaussianSumQuery(l2_norm_clip=1.0, stddev=0.5)
+    # Calcular stddev a partir de l2_norm_clip y noise_multiplier
+    stddev = params["l2_norm_clip"] * params["noise_multiplier"]
+    dp_sum_query = gaussian_query.GaussianSumQuery(
+        l2_norm_clip=params["l2_norm_clip"], stddev=stddev
+    )
 
     optimizer = dp_optimizer.DPGradientDescentOptimizer(
         dp_sum_query,
-        l2_norm_clip=params["l2_norm_clip"],
-        noise_multiplier=params["noise_multiplier"],
         num_microbatches=params["num_microbatches"],
         learning_rate=params["learning_rate"],
         unroll_microbatches=params["unroll_microbatches"],
@@ -222,12 +224,12 @@ def main():
     print("Después del balanceo:", dict(zip(unique_post, counts_post)))
 
     # Training params
-    batch_size = 256
+    batch_size = 1024
     total_epochs = 5
     steps_per_epoch = X_train.shape[0] // batch_size
 
     params = {
-        "l2_norm_clip": 0.8,
+        "l2_norm_clip": 1.5,
         "noise_multiplier": 0.8,
         "num_microbatches": 32,
         "learning_rate": 0.25,
@@ -279,11 +281,43 @@ def main():
                 input_fn=eval_input, steps=eval_steps
             )
 
-            print(f"Evaluation: {eval_results}")
+            # Extraer métricas de evaluación
+            val_loss = float(eval_results.get("loss", 0.0))
+            val_accuracy = float(eval_results.get("accuracy", 0.0))
+            val_auroc = float(eval_results.get("auroc", 0.0))
+            val_auprc = float(eval_results.get("auprc", 0.0))
+
+            # Calcular epsilon
+            epsilon = 0.0
+            if params["noise_multiplier"] > 0:
+                epsilon = compute_epsP(
+                    epoch,
+                    params["noise_multiplier"],
+                    X_train.shape[0],
+                    batch_size,
+                    1e-6,
+                )
+
+            # Imprimir métricas de forma clara
+            print("\n" + "=" * 60)
+            print(f"EPOCH {epoch}/{total_epochs} - MÉTRICAS DE EVALUACIÓN")
+            print("=" * 60)
+            print(f"  • Val Loss:     {val_loss:.4f}")
+            print(f"  • Accuracy:     {val_accuracy:.4f}")
+            print(f"  • AUROC:        {val_auroc:.4f}")
+            print(f"  • AUPRC:        {val_auprc:.4f}")
+            print(f"  • Epsilon (ε):   {epsilon:.4f}")
+            print("=" * 60)
 
             predictions = list(fraud_classifier.predict(input_fn=eval_input))
 
-            mlflow.log_metric("accuracy", float(eval_results["accuracy"]), step=epoch)
+            # Log métricas a MLflow
+            mlflow.log_metric("eval_loss", val_loss, step=epoch)
+            mlflow.log_metric("accuracy", val_accuracy, step=epoch)
+            mlflow.log_metric("auroc", val_auroc, step=epoch)
+            mlflow.log_metric("auprc", val_auprc, step=epoch)
+            if params["noise_multiplier"] > 0:
+                mlflow.log_metric("epsilon", epsilon, step=epoch)
 
             y_pred = [1 if p["prob"][0] > prob_threshold else 0 for p in predictions]
             report = classification_report(
@@ -299,11 +333,6 @@ def main():
             cm_df = pd.DataFrame(
                 cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
             )
-            # --- Pérdida ---
-            mlflow.log_metric("eval_loss", float(eval_results["loss"]), step=epoch)
-
-            # --- Accuracy (ya la tienes) ---
-            mlflow.log_metric("accuracy", float(eval_results["accuracy"]), step=epoch)
 
             # --- Precisión, recall y f1 de cada clase ---
             mlflow.log_metric("precision_class_0", report["0"]["precision"], step=epoch)
@@ -339,18 +368,6 @@ def main():
 
             # (Opcional) Borrar local
             os.remove(cm_csv_path)
-            #  privacy
-            if params["noise_multiplier"] > 0:
-
-                epsilon = compute_epsP(
-                    epoch,
-                    params["noise_multiplier"],
-                    X_train.shape[0],
-                    batch_size,
-                    1e-6,
-                )
-                mlflow.log_metric("epsilon", epsilon, step=epoch)
-                print(f"DP-Gausiana Privacy after {epoch} epochs: ε = {epsilon:.2f}")
 
 
 if __name__ == "__main__":

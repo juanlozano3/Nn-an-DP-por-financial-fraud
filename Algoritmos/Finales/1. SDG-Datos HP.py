@@ -12,6 +12,8 @@ from sklearn.metrics import (
     recall_score,
     precision_recall_fscore_support,
 )
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.feature_selection import mutual_info_classif
 import matplotlib.pyplot as plt
 import seaborn as sns
 import mlflow
@@ -69,6 +71,8 @@ y = data["fraud_bool"].astype(np.int32)
 
 # Convert the categorical columns to dummies
 X = pd.get_dummies(X, drop_first=True)
+# Guardar nombres de características para selección de variables
+feature_names = X.columns.tolist()
 
 # =========================
 # CRÍTICO: Split PRIMERO (evita data leakage)
@@ -120,8 +124,70 @@ y_train = y_train_balanced.to_numpy().astype(np.int32)[shuf_idx]
 X_test = X_test.astype(np.float32)
 y_test = y_test.to_numpy().astype(np.int32)
 
-# Imprimir información
-print("X train:", X_train.shape, "| X test:", X_test.shape)
+# =========================
+# SELECCIÓN DE VARIABLES: VarianceThreshold + Mutual Information
+# =========================
+print("\n" + "=" * 80)
+print("SELECCIÓN DE VARIABLES")
+print("=" * 80)
+print(f"Características iniciales: {len(feature_names)}")
+
+# Parámetros de selección (configurables vía variables de entorno)
+variance_threshold = float(os.environ.get("VARSEL_VARIANCE_THRESHOLD", 0.0))
+max_features = int(os.environ.get("VARSEL_MAX_FEATURES", 200))
+min_features = int(os.environ.get("VARSEL_MIN_FEATURES", 20))
+
+# Paso 1: VarianceThreshold (eliminar características con baja varianza)
+var_selector = VarianceThreshold(threshold=variance_threshold)
+X_train = var_selector.fit_transform(X_train)
+X_test = var_selector.transform(X_test)
+feature_names_after_var = np.array(feature_names)[
+    var_selector.get_support(indices=True)
+]
+
+if X_train.shape[1] == 0:
+    raise RuntimeError(
+        "VarianceThreshold eliminó todas las características; reduce el umbral."
+    )
+
+print(
+    f"Después de VarianceThreshold (threshold={variance_threshold}): {len(feature_names_after_var)} características"
+)
+
+# Paso 2: Mutual Information (seleccionar las más informativas)
+mi_scores = mutual_info_classif(
+    X_train, y_train, discrete_features=False, random_state=SEED
+)
+mi_scores = np.nan_to_num(mi_scores, nan=0.0)
+sorted_indices = np.argsort(mi_scores)[::-1]
+positive = np.sum(mi_scores > 0)
+candidate_top = len(sorted_indices)
+top_k = max(min_features, min(max_features, candidate_top))
+if positive > 0:
+    top_k = max(min_features, min(max_features, positive))
+top_indices = sorted_indices[:top_k]
+
+X_train = X_train[:, top_indices].astype(np.float32)
+X_test = X_test[:, top_indices].astype(np.float32)
+selected_feature_names = feature_names_after_var[top_indices]
+selected_mi_scores = mi_scores[top_indices]
+
+print(
+    f"Después de Mutual Information: {len(selected_feature_names)} características seleccionadas"
+)
+print(f"  • Rango: {min_features} - {max_features} características")
+print(f"  • Características con MI > 0: {positive}")
+
+# Mostrar top 10 características seleccionadas
+top_10_indices = np.argsort(selected_mi_scores)[::-1][:10]
+print("\nTop 10 características seleccionadas (por Mutual Information):")
+for idx in top_10_indices:
+    print(f"  • {selected_feature_names[idx]}: {selected_mi_scores[idx]:.6f}")
+
+print("=" * 80)
+
+# Imprimir información final
+print("\nX train:", X_train.shape, "| X test:", X_test.shape)
 unique_post, counts_post = np.unique(y_train, return_counts=True)
 print("Después del balanceo:", dict(zip(unique_post, counts_post)))
 
@@ -402,6 +468,22 @@ with mlflow.start_run(run_name="Grid_Search_No_DP_Optimized"):
         mlflow.log_param(
             "ram_available_gb", round(hw_summary["ram_available_bytes"] / (1024**3), 2)
         )
+
+    # Log información de selección de variables
+    mlflow.log_param("feature_selection_method", "VarianceThreshold+MutualInfo")
+    mlflow.log_param("feature_variance_threshold", variance_threshold)
+    mlflow.log_param("features_before_selection", len(feature_names))
+    mlflow.log_param("features_after_variance", int(len(feature_names_after_var)))
+    mlflow.log_param("features_selected", int(len(selected_feature_names)))
+    mlflow.log_param("varsel_min_features", min_features)
+    mlflow.log_param("varsel_max_features", max_features)
+
+    # Guardar lista de características seleccionadas como artifact
+    selected_feature_report = "\n".join(
+        f"{name}: {score:.6f}"
+        for name, score in zip(selected_feature_names, selected_mi_scores)
+    )
+    mlflow.log_text(selected_feature_report, "selected_features.txt")
 
     # Crear todas las combinaciones para la barra de progreso
     all_combinations = [
@@ -695,106 +777,38 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     y_pred_prob = best_model.predict(X_test, verbose=0).ravel()
 
     # =========================
-    # Buscar mejor umbral para maximizar F1 de clase 1
+    # Evaluación con threshold fijo (0.2)
     # =========================
-    def find_best_threshold(y_true, y_scores, metric="f1", cls=1, n_steps=99):
-        """Busca el umbral que maximiza precision/recall/f1 para la clase positiva."""
-        best_thr, best_prec, best_rec, best_f1 = 0.5, 0.0, 0.0, 0.0
-        for thr in np.linspace(0.01, 0.99, n_steps):
-            y_pred = (y_scores >= thr).astype(int)
-            prec, rec, f1, _ = precision_recall_fscore_support(
-                y_true, y_pred, average=None, zero_division=0
-            )
-            p, r, f = prec[cls], rec[cls], f1[cls]
-            score = {"precision": p, "recall": r, "f1": f}[metric]
-            if (
-                score
-                > {"precision": best_prec, "recall": best_rec, "f1": best_f1}[metric]
-            ):
-                best_thr, best_prec, best_rec, best_f1 = thr, p, r, f
-        return best_thr, best_prec, best_rec, best_f1
-
-    # Usar el threshold fijo
-    best_thr = THRESHOLD
-
-    # También buscar umbral óptimo para comparar
-    best_thr_optimal, best_prec_optimal, best_rec_optimal, best_f1_optimal = (
-        find_best_threshold(y_test, y_pred_prob, metric="f1", cls=1)
-    )
-
-    # Predicciones con threshold fijo
-    y_pred_search_thr = (y_pred_prob >= best_thr).astype(int)
-    # Predicciones con umbral óptimo (para comparación)
-    y_pred_optimal = (y_pred_prob >= best_thr_optimal).astype(int)
+    y_pred = (y_pred_prob >= THRESHOLD).astype(int)
 
     print("\n" + "=" * 60)
-    print(f"MÉTRICAS CON THRESHOLD DE BÚSQUEDA: {best_thr:.2f}")
+    print(f"MÉTRICAS CON THRESHOLD FIJO ({THRESHOLD}):")
     print("=" * 60)
-    report_search = classification_report(
-        y_test, y_pred_search_thr, digits=4, output_dict=True
-    )
-    print(classification_report(y_test, y_pred_search_thr, digits=4))
-    cm_search = confusion_matrix(y_test, y_pred_search_thr)
-    print("Confusion Matrix (threshold de búsqueda):")
-    print(cm_search)
+    report = classification_report(y_test, y_pred, digits=4, output_dict=True)
+    print(classification_report(y_test, y_pred, digits=4))
+    cm = confusion_matrix(y_test, y_pred)
+    print("Confusion Matrix:")
+    print(cm)
 
-    # Log métricas con threshold de búsqueda
-    mlflow.log_metric("test_precision_class_0_search", report_search["0"]["precision"])
-    mlflow.log_metric("test_recall_class_0_search", report_search["0"]["recall"])
-    mlflow.log_metric("test_f1_class_0_search", report_search["0"]["f1-score"])
-    mlflow.log_metric("test_precision_class_1_search", report_search["1"]["precision"])
-    mlflow.log_metric("test_recall_class_1_search", report_search["1"]["recall"])
-    mlflow.log_metric("test_f1_class_1_search", report_search["1"]["f1-score"])
+    # Log métricas con threshold fijo
+    mlflow.log_metric("test_precision_class_0", report["0"]["precision"])
+    mlflow.log_metric("test_recall_class_0", report["0"]["recall"])
+    mlflow.log_metric("test_f1_class_0", report["0"]["f1-score"])
+    mlflow.log_metric("test_precision_class_1", report["1"]["precision"])
+    mlflow.log_metric("test_recall_class_1", report["1"]["recall"])
+    mlflow.log_metric("test_f1_class_1", report["1"]["f1-score"])
+    mlflow.log_metric("test_precision_macro", report["macro avg"]["precision"])
+    mlflow.log_metric("test_recall_macro", report["macro avg"]["recall"])
+    mlflow.log_metric("test_f1_macro", report["macro avg"]["f1-score"])
 
-    # Guardar matriz de confusión con threshold de búsqueda
-    cm_search_df = pd.DataFrame(
-        cm_search, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
+    # Guardar matriz de confusión
+    cm_df = pd.DataFrame(
+        cm, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
     )
-    cm_search_path = "confusion_matrix_threshold_search.csv"
-    cm_search_df.to_csv(cm_search_path)
-    mlflow.log_artifact(cm_search_path)
-    os.remove(cm_search_path)
-
-    print("\n" + "=" * 60)
-    print(f"MÉTRICAS CON UMBRAL ÓPTIMO (F1) PARA COMPARACIÓN: {best_thr_optimal:.3f}")
-    print("=" * 60)
-    report_optimal = classification_report(
-        y_test, y_pred_optimal, digits=4, output_dict=True
-    )
-    print(classification_report(y_test, y_pred_optimal, digits=4))
-    print(
-        f"Precisión(1): {best_prec_optimal:.4f} | Recall(1): {best_rec_optimal:.4f} | F1(1): {best_f1_optimal:.4f}"
-    )
-    cm_optimal = confusion_matrix(y_test, y_pred_optimal)
-    print("Confusion Matrix (umbral óptimo):")
-    print(cm_optimal)
-
-    # Log métricas con umbral óptimo (para comparación)
-    mlflow.log_param("optimal_threshold_found", best_thr_optimal)
-    mlflow.log_metric(
-        "test_precision_class_0_optimal", report_optimal["0"]["precision"]
-    )
-    mlflow.log_metric("test_recall_class_0_optimal", report_optimal["0"]["recall"])
-    mlflow.log_metric("test_f1_class_0_optimal", report_optimal["0"]["f1-score"])
-    mlflow.log_metric("test_precision_class_1_optimal", best_prec_optimal)
-    mlflow.log_metric("test_recall_class_1_optimal", best_rec_optimal)
-    mlflow.log_metric("test_f1_class_1_optimal", best_f1_optimal)
-    mlflow.log_metric(
-        "test_precision_macro_optimal", report_optimal["macro avg"]["precision"]
-    )
-    mlflow.log_metric(
-        "test_recall_macro_optimal", report_optimal["macro avg"]["recall"]
-    )
-    mlflow.log_metric("test_f1_macro_optimal", report_optimal["macro avg"]["f1-score"])
-
-    # Guardar matriz de confusión con umbral óptimo
-    cm_optimal_df = pd.DataFrame(
-        cm_optimal, index=["Actual_0", "Actual_1"], columns=["Pred_0", "Pred_1"]
-    )
-    cm_optimal_path = "confusion_matrix_threshold_optimal.csv"
-    cm_optimal_df.to_csv(cm_optimal_path)
-    mlflow.log_artifact(cm_optimal_path)
-    os.remove(cm_optimal_path)
+    cm_path = "confusion_matrix.csv"
+    cm_df.to_csv(cm_path)
+    mlflow.log_artifact(cm_path)
+    os.remove(cm_path)
 
     # =========================
     # RESUMEN FINAL DEL MEJOR MODELO
@@ -812,8 +826,8 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     print("  • Learning Rate: {:.0e}".format(best["learning_rate"]))
     print("  • Épocas: {}".format(best["epochs"]))
     print("  • Batch Size: {}".format(BATCH_SIZE))
-    print("  • Threshold usado en búsqueda: {}".format(THRESHOLD))
-    print("  • Umbral óptimo encontrado (F1): {:.3f}".format(best_thr_optimal))
+    print("  • Threshold: {}".format(THRESHOLD))
+    print("  • Características seleccionadas: {}".format(len(selected_feature_names)))
 
     print("\n📈 MÉTRICAS EN VALIDACIÓN (mejor epoch):")
     print("  • Val Loss: {:.4f}".format(best["val_loss"]))
@@ -826,29 +840,19 @@ with mlflow.start_run(run_name="FINAL_Best_Model"):
     print("  • Test AUROC: {:.4f}".format(test_auroc))
     print("  • Test AUPRC: {:.4f}".format(test_auprc))
 
-    print("\n📋 MÉTRICAS CON THRESHOLD DE BÚSQUEDA ({:.2f}):".format(best_thr))
-    print("  • Precision (Clase 0): {:.4f}".format(report_search["0"]["precision"]))
-    print("  • Recall (Clase 0): {:.4f}".format(report_search["0"]["recall"]))
-    print("  • F1 (Clase 0): {:.4f}".format(report_search["0"]["f1-score"]))
-    print("  • Precision (Clase 1): {:.4f}".format(report_search["1"]["precision"]))
-    print("  • Recall (Clase 1): {:.4f}".format(report_search["1"]["recall"]))
-    print("  • F1 (Clase 1): {:.4f}".format(report_search["1"]["f1-score"]))
-    print(
-        "  • Precision (Macro): {:.4f}".format(report_search["macro avg"]["precision"])
-    )
-    print("  • Recall (Macro): {:.4f}".format(report_search["macro avg"]["recall"]))
-    print("  • F1 (Macro): {:.4f}".format(report_search["macro avg"]["f1-score"]))
+    print("\n📋 MÉTRICAS CON THRESHOLD FIJO ({:.2f}):".format(THRESHOLD))
+    print("  • Precision (Clase 0): {:.4f}".format(report["0"]["precision"]))
+    print("  • Recall (Clase 0): {:.4f}".format(report["0"]["recall"]))
+    print("  • F1 (Clase 0): {:.4f}".format(report["0"]["f1-score"]))
+    print("  • Precision (Clase 1): {:.4f}".format(report["1"]["precision"]))
+    print("  • Recall (Clase 1): {:.4f}".format(report["1"]["recall"]))
+    print("  • F1 (Clase 1): {:.4f}".format(report["1"]["f1-score"]))
+    print("  • Precision (Macro): {:.4f}".format(report["macro avg"]["precision"]))
+    print("  • Recall (Macro): {:.4f}".format(report["macro avg"]["recall"]))
+    print("  • F1 (Macro): {:.4f}".format(report["macro avg"]["f1-score"]))
 
-    print("\n📋 MÉTRICAS CON UMBRAL ÓPTIMO ({:.3f}):".format(best_thr_optimal))
-    print("  • Precision (Clase 1): {:.4f}".format(best_prec_optimal))
-    print("  • Recall (Clase 1): {:.4f}".format(best_rec_optimal))
-    print("  • F1 (Clase 1): {:.4f}".format(best_f1_optimal))
-
-    print("\n🔢 MATRIZ DE CONFUSIÓN (Threshold de búsqueda):")
-    print(cm_search_df)
-
-    print("\n🔢 MATRIZ DE CONFUSIÓN (Umbral óptimo):")
-    print(cm_optimal_df)
+    print("\n🔢 MATRIZ DE CONFUSIÓN:")
+    print(cm_df)
 
     print("\n" + "=" * 80)
     print("=" * 80)
